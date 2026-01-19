@@ -2,7 +2,7 @@
 
 ###############################################################################
 # Ubuntu Server Optimization Script for Raspberry Pi Factor 201
-# Hardware: 4GB RAM, 128GB SSD
+# Hardware: 4GB RAM, 128GB SSD 
 # Purpose: Prepare system for OpenPoint SCADA Polling IoT Edge Module
 ###############################################################################
 
