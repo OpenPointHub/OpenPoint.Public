@@ -1,8 +1,8 @@
-﻿#!/bin/bash
+#!/bin/bash
 
 ###############################################################################
 # Ubuntu Server Optimization Script for Raspberry Pi Factor 201
-# Hardware: 4GB RAM, 128GB SSD 
+# Hardware: 4GB RAM, 128GB SSD
 # Purpose: Prepare system for OpenPoint SCADA Polling IoT Edge Module
 ###############################################################################
 
@@ -30,7 +30,7 @@ fi
 # Check if IoT Edge is already configured and warn user
 if command -v iotedge &> /dev/null; then
     echo -e "${YELLOW}════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}│  WARNING: IoT Edge Already Installed      │${NC}"
+    echo -e "${YELLOW}│  WARNING: IoT Edge Already Installed      │${NCrm --}"
     echo -e "${YELLOW}════════════════════════════════════════════${NC}"
     echo ""
     echo -e "${YELLOW}This system already has Azure IoT Edge installed.${NC}"
@@ -44,7 +44,7 @@ if command -v iotedge &> /dev/null; then
     echo "  ✓ Backup Docker config before changes"
     echo "  ⚠ May require restart of Docker (will disrupt running containers)"
     echo ""
-    read -p "Continue? (y/N): " -n 1 -r
+    read -p "Continue? (y/N): " REPLY
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo "Setup cancelled."
@@ -105,7 +105,7 @@ if [ -n "$ROOT_DISK" ]; then
         echo -e "${YELLOW}  ⚠ Warning: Root filesystem appears to be on HDD/SD card${NC}"
         echo -e "${YELLOW}  This script is optimized for SSD storage.${NC}"
         echo ""
-        read -p "Continue anyway? (y/N): " -n 1 -r
+        read -p "Continue anyway? (y/N): " REPLY
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             echo "Setup cancelled."
@@ -247,7 +247,7 @@ echo -e "${BLUE}│  System Updates Complete (7/14)                             
 echo -e "${BLUE}════════════════════════════════════════════${NC}"
 echo ""
 echo -e "${YELLOW}Press ENTER to continue with system optimizations...${NC}"
-read -r
+read REPLY
 
 # Optimize swap settings
 echo ""
@@ -371,7 +371,7 @@ echo -e "${BLUE}│  System Optimization Complete (12/14)                       
 echo -e "${BLUE}════════════════════════════════════════════${NC}"
 echo ""
 echo -e "${YELLOW}Press ENTER to continue with container engine installation...${NC}"
-read -r
+read REPLY
 
 # Install Moby (Microsoft's container engine for IoT Edge)
 echo ""
@@ -469,7 +469,7 @@ echo -e "${BLUE}│  Container Engine Ready (13/14)                             
 echo -e "${BLUE}════════════════════════════════════════════${NC}"
 echo ""
 echo -e "${YELLOW}Press ENTER to continue with IoT Edge installation...${NC}"
-read -r
+read REPLY
 
 # Install Azure IoT Edge Runtime
 echo ""
@@ -766,7 +766,7 @@ all_logs() {
     echo -e "${GREEN}All module logs since boot${NC}"
     echo -e "${YELLOW}Warning: This may be a large amount of data${NC}"
     echo ""
-    read -p "Continue? (y/N): " -n 1 -r
+    read -p "Continue? (y/N): " REPLY
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         sudo iotedge logs $MODULE_NAME | less
@@ -850,7 +850,7 @@ echo -e "${BLUE}│  IoT Edge Installation Complete (14/14)                     
 echo -e "${BLUE}════════════════════════════════════════════${NC}"
 echo ""
 echo -e "${YELLOW}Press ENTER to see installation summary...${NC}"
-read -r
+read REPLY
 
 # Summary
 echo ""
@@ -878,7 +878,7 @@ echo "   ✓ System monitoring script created (iot-monitor.sh)"
 echo "   ✓ SCADA log viewer created (scada-logs.sh)"
 echo ""
 echo -e "${YELLOW}Press ENTER to see useful commands and next steps...${NC}"
-read -r
+read REPLY
 
 # Page 2: Useful Commands
 clear
@@ -907,7 +907,7 @@ echo "   • docker ps                               - Running containers"
 echo "   • sudo systemctl status defender-iot-micro-agent - Defender status"
 echo ""
 echo -e "${YELLOW}Press ENTER to see configuration steps...${NC}"
-read -r
+read REPLY
 
 # Page 3: Next Steps
 clear
