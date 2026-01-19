@@ -78,6 +78,11 @@ sudo bash ./setup-iot-edge-device.sh
 - Caches modules locally for offline use
 - Always uses latest module versions when refreshed
 
+**Module Caching:**
+- On first run, modules are downloaded and cached to `/usr/local/share/openpoint-setup/modules/`
+- Subsequent runs use cached modules (works offline)
+- Use option 9 to refresh cached modules with latest versions from GitHub
+
 ### **Running Individual Modules**
 
 ```bash
@@ -98,16 +103,58 @@ chmod +x iot-monitor.sh
 
 ## 📋 **Interactive Menu**
 
-Both setup scripts provide an interactive menu:
+The setup script provides an interactive menu with the following options:
 
-1. **Full Setup** - Complete installation (runs all steps)
-2. **System Configuration** - Keyboard/timezone/locale
-3. **System Updates** - Package updates
+1. **Full Setup** - Complete installation (recommended for first-time setup)
+   - Runs all steps sequentially
+   - Caches modules for offline use
+   - Takes 15-20 minutes
+
+2. **System Configuration** - Keyboard/timezone/locale/hardware detection
+   - Sets keyboard layout to US
+   - Sets timezone to UTC
+   - Configures locale to en_US.UTF-8
+   - Detects RAM, disk, and architecture
+
+3. **System Updates** - Package updates and service management
+   - Updates all system packages
+   - Installs essential tools (curl, wget, git, etc.)
+   - Disables unnecessary services (Bluetooth, ModemManager, CUPS, cloud-init)
+
 4. **System Optimization** - Performance tuning
-5. **Container Engine** - Docker/Moby
-6. **IoT Edge Runtime** - Azure IoT Edge
-7. **Helper Scripts** - Monitoring tools
-8. **Clean Duplicates** - Maintenance utility
+   - Optimizes swap settings for 4GB RAM
+   - Enables SSD TRIM
+   - Enables hardware watchdog
+   - Increases file descriptor limits
+   - Applies network optimizations
+
+5. **Container Engine** - Docker/Moby installation and configuration
+   - Installs Moby container engine
+   - Configures logging driver for IoT Edge
+   - Sets storage driver to overlay2
+
+6. **IoT Edge Runtime** - Azure IoT Edge and TPM tools
+   - Installs Azure IoT Edge runtime
+   - Installs Microsoft Defender for IoT
+   - Installs TPM 2.0 tools
+   - Detects TPM hardware
+
+7. **Helper Scripts** - Download monitoring and log viewer utilities
+   - Downloads get-tpm-key.sh (if TPM present)
+   - Downloads iot-monitor.sh
+   - Downloads scada-logs.sh
+
+8. **Clean Duplicate Config** - Maintenance utility
+   - Removes duplicate entries from /etc/sysctl.conf
+   - Removes duplicate entries from /etc/security/limits.conf
+   - Safe to run multiple times
+
+9. **Refresh Module Cache** - Update all cached setup modules
+   - Clears existing module cache
+   - Re-downloads all modules from GitHub
+   - Gets latest versions of all setup modules
+
+0. **Exit** - Exit the setup script
 
 ## 🔧 **Usage Examples**
 
@@ -136,6 +183,96 @@ sudo bash ./setup-iot-edge-device.sh
 sudo bash ./setup-iot-edge-device.sh
 # Choose option 8 (Clean Duplicates)
 ```
+
+### **Refresh Module Cache**
+```bash
+sudo bash ./setup-iot-edge-device.sh
+# Choose option 9 (Refresh Module Cache)
+```
+
+## 💾 **Offline Deployment**
+
+The setup script supports offline deployment after the first run:
+
+### **Prepare for Offline Use:**
+```bash
+# 1. Download main script (requires internet)
+wget https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/setup-iot-edge-device.sh
+chmod +x setup-iot-edge-device.sh
+
+# 2. Run once to cache modules AND download helper scripts (requires internet)
+sudo bash ./setup-iot-edge-device.sh
+# Choose option 1 (Full Setup) to download and cache all modules + helpers
+# OR run these separately:
+#   - Option 9 to cache setup modules
+#   - Option 7 to download helper scripts
+
+# 3. Everything is now cached - script works offline!
+```
+
+**What Gets Cached:**
+- **Setup modules** → `/usr/local/share/openpoint-setup/modules/` (6 files)
+- **Helper scripts** → `/usr/local/bin/` (3 files: get-tpm-key.sh, iot-monitor.sh, scada-logs.sh)
+- **Main script** → Wherever you downloaded it (e.g., `~/setup-iot-edge-device.sh`)
+
+### **Offline Usage:**
+```bash
+# Script runs using cached modules (no internet needed)
+sudo bash ./setup-iot-edge-device.sh
+
+# During module loading, you'll see:
+# ✓ Using cached system-config
+# ✓ Using cached system-updates
+# (etc...)
+
+# Helper scripts are already installed:
+iot-monitor.sh      # Works offline
+scada-logs.sh       # Works offline
+get-tpm-key.sh      # Works offline (if TPM present)
+```
+
+### **Verify Offline Readiness:**
+```bash
+# Check cached modules
+ls -la /usr/local/share/openpoint-setup/modules/
+# Should show: system-config.sh, system-updates.sh, etc.
+
+# Check helper scripts
+ls -la /usr/local/bin/{get-tpm-key,iot-monitor,scada-logs}.sh
+# Should show all three scripts
+
+# Check main script
+ls -la ~/setup-iot-edge-device.sh
+# Should show the main script
+```
+
+### **Cached Module Location:**
+```
+/usr/local/share/openpoint-setup/modules/  # Setup modules (sourced by main script)
+├── system-config.sh
+├── system-updates.sh
+├── system-optimization.sh
+├── container-engine.sh
+├── iotedge-runtime.sh
+└── helper-scripts.sh
+
+/usr/local/bin/                            # Helper utilities (user commands)
+├── get-tpm-key.sh                         # (only if TPM was detected)
+├── iot-monitor.sh
+└── scada-logs.sh
+```
+
+**Note:** If you run the setup script for the first time in an offline environment, it will fail to download modules. Always run it once with internet connectivity before going offline.
+
+### **Quick Reference - What Needs Internet:**
+
+| Action | Requires Internet? | Downloads What? |
+|--------|-------------------|-----------------|
+| **First run (option 1)** | ✅ Yes | All modules + helper scripts |
+| **Subsequent runs** | ❌ No | Uses cached modules |
+| **Option 7 (Helper Scripts)** | ✅ Yes | Re-downloads helpers to `/usr/local/bin/` |
+| **Option 9 (Refresh Cache)** | ✅ Yes | Re-downloads modules to cache |
+| **Running individual steps (2-6,8)** | ❌ No | Uses cached modules |
 
 ## 📖 **After Setup**
 
@@ -233,18 +370,27 @@ sudo iotedge list
 
 ## 🔄 **Updating Scripts**
 
-### **Update All Helper Scripts**
+### **Update Cached Setup Modules**
 ```bash
 sudo bash setup-iot-edge-device.sh
-# Choose option 7
+# Choose option 9 (Refresh Module Cache)
 ```
 
-### **Update Individual Module**
+This will re-download all setup modules to get the latest versions from GitHub.
+
+### **Update Helper Scripts**
 ```bash
-# Example: Update system optimization module
-wget https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/modules/system-optimization.sh -O /tmp/system-optimization.sh
-chmod +x /tmp/system-optimization.sh
-sudo bash /tmp/system-optimization.sh
+sudo bash setup-iot-edge-device.sh
+# Choose option 7 (Helper Scripts)
+```
+
+This will re-download the helper utilities (get-tpm-key.sh, iot-monitor.sh, scada-logs.sh).
+
+### **Update Individual Module (Advanced)**
+```bash
+# Example: Update system optimization module manually
+wget https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/modules/system-optimization.sh -O /usr/local/share/openpoint-setup/modules/system-optimization.sh
+chmod +x /usr/local/share/openpoint-setup/modules/system-optimization.sh
 ```
 
 ## 📝 **Development Notes**
