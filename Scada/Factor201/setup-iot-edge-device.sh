@@ -498,15 +498,20 @@ container_engine() {
         
         echo "  Updating package lists..."
         apt-get update --fix-missing 2>&1 | tail -5
-        local update_result=$?
-        if [ $update_result -eq 0 ]; then
-            echo "  ✓ Package lists updated"
-        else
-            echo -e "${YELLOW}  ⚠ Update had warnings, continuing...${NC}"
-        fi
         
-        echo ""
-        echo "  Installing moby-engine (this may take a few minutes)..."
+        echo "  Installing container engine (this may take a few minutes)..."
+        
+        # Add Microsoft repository for moby-engine
+        echo "  Adding Microsoft package repository..."
+        UBUNTU_VERSION=$(lsb_release -rs)
+        wget -q https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+        dpkg -i packages-microsoft-prod.deb > /dev/null 2>&1
+        rm packages-microsoft-prod.deb
+        
+        echo "  Updating package lists with Microsoft repository..."
+        apt-get update --fix-missing 2>&1 | tail -5
+        
+        echo "  Installing moby-engine from Microsoft repository..."
         apt-get install -y moby-engine 2>&1 | tee /tmp/docker-install.log | tail -15
         local install_result=$?
         
@@ -522,8 +527,9 @@ container_engine() {
             echo ""
             echo "Diagnostic commands to run:"
             echo "  apt-cache policy moby-engine"
-            echo "  apt-cache search moby"
             echo "  cat /tmp/docker-install.log"
+            echo ""
+            echo "Microsoft repository should provide moby-engine for Ubuntu ${UBUNTU_VERSION}"
             set -e
             return 1
         fi
