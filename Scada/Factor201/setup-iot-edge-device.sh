@@ -489,11 +489,68 @@ container_engine() {
         # Wait for package manager
         wait_for_package_manager || return 1
         
-        apt-get update --fix-missing > /dev/null 2>&1
-        apt-get install -y --fix-missing moby-engine moby-cli > /dev/null 2>&1
+        echo "  Updating package lists..."
+        if apt-get update --fix-missing 2>&1 | tail -5; then
+            echo "  ✓ Package lists updated"
+        else
+            echo -e "${YELLOW}  ⚠ Update had warnings, continuing...${NC}"
+        fi
+        
+        echo ""
+        echo "  Installing moby-engine..."
+        if apt-get install -y moby-engine 2>&1 | tee /tmp/docker-install.log | tail -15; then
+            echo ""
+            echo "  ✓ Moby engine package installed"
+        else
+            echo ""
+            echo -e "${RED}  ✗ Failed to install moby-engine${NC}"
+            echo ""
+            echo "Last 20 lines of installation log:"
+            tail -20 /tmp/docker-install.log
+            echo ""
+            echo "Diagnostic commands:"
+            echo "  Check if package exists: apt-cache policy moby-engine"
+            echo "  Check repositories: cat /etc/apt/sources.list"
+            echo "  Check for errors: cat /tmp/docker-install.log"
+            return 1
+        fi
+        
+        echo ""
+        echo "  Starting Docker service..."
+        if systemctl restart docker 2>&1; then
+            echo "  ✓ Docker service started"
+        else
+            echo -e "${RED}  ✗ Failed to start Docker service${NC}"
+            systemctl status docker.service --no-pager -l
+            return 1
+        fi
+    fi
+    
+    # Verify Docker is running
+    echo ""
+    echo "  Verifying Docker installation..."
+    
+    if ! systemctl is-active --quiet docker; then
+        echo -e "${YELLOW}  ⚠ Docker service not active, attempting to start...${NC}"
         systemctl start docker
-        systemctl enable docker > /dev/null 2>&1
-        echo "  ✓ Moby container engine installed"
+        sleep 2
+    fi
+    
+    if systemctl is-active --quiet docker; then
+        echo "  ✓ Docker service is active"
+    else
+        echo -e "${RED}  ✗ Docker service failed to start${NC}"
+        systemctl status docker --no-pager
+        return 1
+    fi
+    
+    if docker --version > /dev/null 2>&1; then
+        DOCKER_VERSION=$(docker --version)
+        echo "  ✓ Docker command works: ${DOCKER_VERSION}"
+    else
+        echo -e "${RED}  ✗ Docker command failed${NC}"
+        echo "  Try running: docker --version"
+        return 1
     fi
     
     # Configure Docker
@@ -503,6 +560,7 @@ container_engine() {
     
     if [ -f /etc/docker/daemon.json ]; then
         if ! grep -q '"log-driver": "local"' /etc/docker/daemon.json; then
+            echo "  Backing up existing daemon.json..."
             cp /etc/docker/daemon.json /etc/docker/daemon.json.backup.$(date +%Y%m%d_%H%M%S)
             cat > /etc/docker/daemon.json <<EOF
 {
@@ -521,12 +579,14 @@ container_engine() {
   }
 }
 EOF
+            echo "  Restarting Docker to apply configuration..."
             systemctl restart docker
             echo "  ✓ Docker reconfigured for IoT Edge"
         else
             echo "  ✓ Docker already configured for IoT Edge"
         fi
     else
+        echo "  Creating daemon.json configuration..."
         cat > /etc/docker/daemon.json <<EOF
 {
   "log-driver": "local",
@@ -544,8 +604,9 @@ EOF
   }
 }
 EOF
+        echo "  Restarting Docker to apply configuration..."
         systemctl restart docker
-        echo "  ✓ Container engine configured"
+        echo "  ✓ Docker configured"
     fi
     
     echo ""

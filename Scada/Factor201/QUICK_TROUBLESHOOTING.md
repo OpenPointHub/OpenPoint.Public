@@ -43,6 +43,9 @@ df -h /
 
 # 4. Running as root
 sudo whoami  # Should say "root"
+
+# 5. Clean download (if re-running helper scripts)
+sudo rm -f /usr/local/bin/{get-tpm-key,iot-monitor,scada-logs}.sh
 ```
 
 ---
