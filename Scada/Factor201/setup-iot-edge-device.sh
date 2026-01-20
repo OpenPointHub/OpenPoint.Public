@@ -280,14 +280,18 @@ EOF
     DISK_SIZE=$(df -BG / | awk 'NR==2 {print $2}' | sed 's/G//')
     ARCH=$(uname -m)
     
-    echo "  💾 RAM: ${TOTAL_RAM}MB ($(awk "BEGIN {printf \"%.1f\", $TOTAL_RAM/1024}")GB)"
+    # Calculate RAM in GB for display (simple division by 1024)
+    RAM_GB=$(echo "scale=1; $TOTAL_RAM / 1024" | bc)
+    
+    echo "  💾 RAM: ${TOTAL_RAM}MB (${RAM_GB}GB)"
     echo "  💿 Disk: ${DISK_SIZE}GB"
     echo "  🖥️  Architecture: ${ARCH}"
     
     # 4GB RAM (4096MB) shows as ~3700-3900MB due to system/GPU reserved memory
     # Warn only if significantly below expected range
     if [[ $TOTAL_RAM -lt 3500 ]]; then
-        echo -e "${YELLOW}  ⚠ Warning: Detected ${TOTAL_RAM}MB RAM ($(awk "BEGIN {printf \"%.1f\", $TOTAL_RAM/1024}")GB), expected ~3.7GB for 4GB hardware.${NC}"
+        WARN_RAM_GB=$(echo "scale=1; $TOTAL_RAM / 1024" | bc)
+        echo -e "${YELLOW}  ⚠ Warning: Detected ${TOTAL_RAM}MB RAM (${WARN_RAM_GB}GB), expected ~3.7GB for 4GB hardware.${NC}"
         echo -e "${YELLOW}     System optimizations are tuned for 4GB. Performance may vary.${NC}"
     fi
     
