@@ -98,16 +98,85 @@ check_package_manager() {
         echo "Options:"
         echo "  1. Wait 5-10 minutes for it to finish, then run this script"
         echo "  2. Check what's running: ps aux | grep apt"
-        echo "  3. Stop automatic updates:"
+        echo "  3. Stop automatic updates temporarily:"
         echo "     sudo systemctl stop apt-daily.timer"
         echo "     sudo systemctl stop apt-daily-upgrade.timer"
+        echo "  4. Disable automatic updates permanently (recommended for IoT Edge):"
+        echo "     sudo systemctl disable apt-daily.timer"
+        echo "     sudo systemctl disable apt-daily-upgrade.timer"
+        echo "     sudo systemctl stop unattended-upgrades"
         echo ""
-        read -p "Continue anyway (not recommended)? (y/N): " REPLY
+        read -p "Would you like to disable automatic updates now? (y/N): " REPLY
         echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo "Disabling automatic updates..."
+            systemctl stop apt-daily.timer 2>/dev/null || true
+            systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
+            systemctl disable apt-daily.timer 2>/dev/null || true
+            systemctl disable apt-daily-upgrade.timer 2>/dev/null || true
+            systemctl stop unattended-upgrades 2>/dev/null || true
+            systemctl disable unattended-upgrades 2>/dev/null || true
+            echo -e "${GREEN}✓ Automatic updates disabled${NC}"
+            echo ""
+            echo "Waiting 10 seconds for processes to release locks..."
+            sleep 10
+            
+            # Kill any remaining apt processes
+            killall apt apt-get 2>/dev/null || true
+            sleep 2
+            
+            echo -e "${GREEN}✓ Ready to continue${NC}"
+            return 0
+        else
+            read -p "Continue anyway (not recommended)? (y/N): " REPLY2
+            echo
+            if [[ ! $REPLY2 =~ ^[Yy]$ ]]; then
+                exit 1
+            fi
         fi
     fi
+}
+
+# Wait for package manager to be available
+wait_for_package_manager() {
+    local max_wait=300  # 5 minutes max
+    local waited=0
+    
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || 
+          fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || 
+          fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+        
+        if [ $waited -eq 0 ]; then
+            echo ""
+            echo -e "${YELLOW}⏳ Package manager is busy (likely unattended-upgrades)${NC}"
+            echo "   Waiting for it to finish (up to 5 minutes)..."
+        fi
+        
+        sleep 5
+        waited=$((waited + 5))
+        
+        if [ $((waited % 30)) -eq 0 ]; then
+            echo "   Still waiting... (${waited}s elapsed)"
+        fi
+        
+        if [ $waited -ge $max_wait ]; then
+            echo ""
+            echo -e "${RED}Timeout waiting for package manager${NC}"
+            echo "You can:"
+            echo "  1. Wait longer and run the script again"
+            echo "  2. Stop unattended upgrades:"
+            echo "     sudo systemctl stop unattended-upgrades"
+            echo "     sudo killall apt apt-get dpkg"
+            return 1
+        fi
+    done
+    
+    if [ $waited -gt 0 ]; then
+        echo -e "${GREEN}   ✓ Package manager is now available${NC}"
+        echo ""
+    fi
+    
+    return 0
 }
 
 # System requirements notice
@@ -232,6 +301,9 @@ system_updates() {
     echo -e "${BLUE}[STEP 2] System Updates & Package Installation${NC}"
     echo ""
     
+    # Wait for package manager before starting
+    wait_for_package_manager || return 1
+    
     # Update system
     echo -e "${GREEN}[1/3] Updating system packages...${NC}"
     echo "  (This may take several minutes...)"
@@ -250,6 +322,10 @@ system_updates() {
     # Install essential packages
     echo ""
     echo -e "${GREEN}[2/3] Installing essential packages...${NC}"
+    
+    # Wait again in case unattended-upgrades started during upgrade
+    wait_for_package_manager || return 1
+    
     if apt-get install -y --fix-missing \
         curl wget git ca-certificates gnupg lsb-release \
         smartmontools iotop htop net-tools iftop 2>&1 | tail -10; then
@@ -333,6 +409,10 @@ system_optimization() {
     if ! grep -q "bcm2835_wdt" /etc/modules 2>/dev/null; then
         echo "bcm2835_wdt" >> /etc/modules
     fi
+    
+    # Wait for package manager before installing watchdog
+    wait_for_package_manager || return 1
+    
     apt-get install -y --fix-missing watchdog > /dev/null 2>&1
     cat > /etc/watchdog.conf <<EOF
 watchdog-device = /dev/watchdog
@@ -399,6 +479,9 @@ container_engine() {
         DOCKER_VERSION=$(docker --version)
         echo "  ✓ Container engine already installed (${DOCKER_VERSION})"
     else
+        # Wait for package manager
+        wait_for_package_manager || return 1
+        
         apt-get update --fix-missing > /dev/null 2>&1
         apt-get install -y --fix-missing moby-engine moby-cli > /dev/null 2>&1
         systemctl start docker
@@ -472,6 +555,9 @@ iotedge_runtime() {
     if command -v iotedge &> /dev/null; then
         echo "  ✓ IoT Edge already installed ($(iotedge --version))"
     else
+        # Wait for package manager
+        wait_for_package_manager || return 1
+        
         UBUNTU_VERSION=$(lsb_release -rs)
         wget -q https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
         dpkg -i packages-microsoft-prod.deb > /dev/null 2>&1
@@ -486,6 +572,9 @@ iotedge_runtime() {
     echo ""
     echo -e "${GREEN}[2/2] Installing TPM 2.0 tools...${NC}"
     if ! command -v tpm2_getcap &> /dev/null; then
+        # Wait for package manager again
+        wait_for_package_manager || return 1
+        
         apt-get install -y --fix-missing tpm2-tools > /dev/null 2>&1
         echo "  ✓ TPM 2.0 tools installed"
     else

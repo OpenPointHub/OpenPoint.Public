@@ -42,6 +42,9 @@ sudo bash ./setup-iot-edge-device.sh
 - All setup functions embedded in one script
 - Downloads helper utilities to `/usr/local/bin/`
 - Works offline after helper scripts are downloaded
+- **Automatically handles Ubuntu's automatic updates**
+
+**⚠️ Common Issue:** If script returns to menu during "Updating system packages...", it's likely Ubuntu's automatic updates running in background. The script will offer to disable them automatically. See [Quick Troubleshooting Guide](QUICK_TROUBLESHOOTING.md) for details.
 
 ## 📋 **Interactive Menu**
 
@@ -221,6 +224,57 @@ scada-logs.sh
 
 ## 🐛 **Troubleshooting**
 
+### Script Returns to Menu Unexpectedly (Most Common Issue)
+
+**Symptoms:**
+- Script was running "Updating system packages..." then suddenly returned to menu
+- No error message shown
+- Happens during Step 2 or Step 3
+
+**Cause:** Ubuntu's automatic updates (unattended-upgrades) started running in the background and locked the package manager.
+
+**Solution 1: Let Script Handle It (Recommended)**
+
+The script now:
+1. ✅ **Detects** when package manager is locked
+2. ✅ **Waits up to 5 minutes** for it to finish
+3. ✅ **Offers to disable** automatic updates permanently
+
+Just run the script again:
+```bash
+sudo bash ./setup-iot-edge-device.sh
+```
+
+When prompted "Would you like to disable automatic updates now?", answer **Y**es.
+
+**Solution 2: Manually Disable Automatic Updates First**
+
+For IoT Edge devices, automatic updates can cause issues. Disable them before running setup:
+
+```bash
+# Stop current automatic updates
+sudo systemctl stop unattended-upgrades
+sudo systemctl stop apt-daily.timer
+sudo systemctl stop apt-daily-upgrade.timer
+
+# Disable permanently
+sudo systemctl disable unattended-upgrades
+sudo systemctl disable apt-daily.timer
+sudo systemctl disable apt-daily-upgrade.timer
+
+# Kill any remaining apt processes
+sudo killall apt apt-get 2>/dev/null || true
+
+# Wait 10 seconds, then run setup
+sleep 10
+sudo bash ./setup-iot-edge-device.sh
+```
+
+**Why Disable Automatic Updates on IoT Edge?**
+- ✅ Prevents package conflicts during module updates
+- ✅ Avoids unexpected reboots that disrupt data collection
+- ✅ You control when updates happen (via this setup script)
+
 ### Script Stops Unexpectedly
 
 **Symptoms:**
@@ -258,17 +312,14 @@ sudo lsof /var/lib/apt/lists/lock
 
 **"dpkg lock" or "Unable to acquire lock"**
 
-Another package manager is running. Wait for it to finish or kill it:
+Another package manager is running. The script will now wait automatically, but you can also:
 ```bash
 # Check what's using apt
 ps aux | grep apt
 
-# Wait for automatic updates to finish
-sudo systemctl stop apt-daily.timer
-sudo systemctl stop apt-daily-upgrade.timer
-
-# Run script again
-sudo bash ./setup-iot-edge-device.sh
+# Force stop (use with caution)
+sudo systemctl stop unattended-upgrades
+sudo killall apt apt-get dpkg
 ```
 
 **"Network unreachable" during package install**
@@ -284,7 +335,7 @@ cat /etc/resolv.conf
 
 **Script fails at Step 2 (System Updates)**
 
-The package repository might be updating. Try again in 5 minutes, or run in debug mode to see the specific error.
+Most likely unattended-upgrades. The script now handles this automatically.
 
 ### Getting Help
 
@@ -300,5 +351,26 @@ lsb_release -a >> system-info.txt
 free -h >> system-info.txt
 df -h >> system-info.txt
 
-# 3. Send both files to support
+# 3. Check for automatic updates
+systemctl status unattended-upgrades >> system-info.txt
+systemctl status apt-daily.timer >> system-info.txt
+
+# 4. Send both files to support
 ```
+
+## 📄 **License**
+
+These scripts are part of the OpenPoint SCADA system.
+
+---
+
+## 📚 **Additional Documentation**
+
+- [Quick Troubleshooting Guide](QUICK_TROUBLESHOOTING.md) - Fast solutions for common issues
+- [Setup Improvements](SETUP_IMPROVEMENTS.md) - Technical details on unattended-upgrades handling
+- [Network Configuration](NETWORK_CONFIGURATION.md) - Container networking for RTAC connectivity
+
+---
+
+**Repository:** https://github.com/OpenPointHub/OpenPoint.Public  
+**Support:** Contact OpenPoint support team
