@@ -31,13 +31,31 @@ else
     echo "   ✗ No TPM device found"
 fi
 
-# Defender for IoT Status
+# IoT Edge Security Services
 echo ""
-echo "🛡️  Microsoft Defender for IoT:"
-if systemctl is-active --quiet defender-iot-micro-agent 2>/dev/null; then
-    echo "   ✓ Defender micro-agent is running"
+echo "🔒 IoT Edge Security Services:"
+if systemctl is-active --quiet aziot-edged 2>/dev/null; then
+    echo "   ✓ IoT Edge security daemon (aziot-edged) is running"
 else
-    echo "   ⚠ Defender micro-agent not running or not installed"
+    echo "   ⚠ IoT Edge security daemon not running"
+fi
+
+if systemctl is-active --quiet aziot-identityd 2>/dev/null; then
+    echo "   ✓ Identity service (aziot-identityd) is running"
+else
+    echo "   ⚠ Identity service not running"
+fi
+
+if systemctl is-active --quiet aziot-keyd 2>/dev/null; then
+    echo "   ✓ Key service (aziot-keyd) is running"
+else
+    echo "   ⚠ Key service not running"
+fi
+
+if systemctl is-active --quiet aziot-certd 2>/dev/null; then
+    echo "   ✓ Certificate service (aziot-certd) is running"
+else
+    echo "   ⚠ Certificate service not running"
 fi
 
 # Memory Usage

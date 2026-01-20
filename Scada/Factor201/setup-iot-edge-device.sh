@@ -689,13 +689,15 @@ iotedge_runtime() {
         
         echo ""
         echo "  Installing Azure IoT Edge Runtime (this may take a few minutes)..."
-        apt-get install -y --fix-missing aziot-edge defender-iot-micro-agent-edge 2>&1 | tee /tmp/iotedge-install.log | tail -15
+        
+        # Install aziot-edge (core IoT Edge runtime)
+        # Note: defender-iot-micro-agent-edge was retired in August 2025
+        apt-get install -y aziot-edge 2>&1 | tee /tmp/iotedge-install.log | tail -15
         local install_result=$?
         
         if [ $install_result -eq 0 ]; then
             echo ""
             echo "  ✓ IoT Edge runtime installed"
-            echo "  ✓ Microsoft Defender for IoT installed"
         else
             echo ""
             echo -e "${RED}  ✗ Failed to install IoT Edge runtime (exit code: $install_result)${NC}"
@@ -705,7 +707,6 @@ iotedge_runtime() {
             echo ""
             echo "Diagnostic commands to run:"
             echo "  apt-cache policy aziot-edge"
-            echo "  apt-cache policy defender-iot-micro-agent-edge"
             echo "  cat /tmp/iotedge-install.log"
             echo ""
             echo "Microsoft repository should provide IoT Edge for Ubuntu ${UBUNTU_VERSION}"

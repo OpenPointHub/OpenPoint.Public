@@ -82,10 +82,10 @@ The setup script provides an interactive menu with the following options:
    - Sets storage driver to overlay2
 
 6. **IoT Edge Runtime** - Azure IoT Edge and TPM tools
-   - Installs Azure IoT Edge runtime
-   - Installs Microsoft Defender for IoT
+   - Installs Azure IoT Edge runtime (aziot-edge)
    - Installs TPM 2.0 tools
    - Detects TPM hardware
+   - **Note:** Microsoft Defender for IoT micro agent (retired August 2025) is no longer installed
 
 7. **Helper Scripts** - Download monitoring and log viewer utilities
    - Downloads get-tpm-key.sh (if TPM present)
@@ -371,6 +371,7 @@ These scripts are part of the OpenPoint SCADA system.
 
 - [Quick Troubleshooting Guide](QUICK_TROUBLESHOOTING.md) - Fast solutions for common issues
 - [Error Handling Improvements](ERROR_HANDLING_IMPROVEMENTS.md) - Comprehensive error handling details
+- [Defender for IoT Deprecation](DEFENDER_DEPRECATION.md) - Why Defender micro agent was removed (Aug 2025)
 - [Cache-Busting Guide](CACHE_BUSTING.md) - Ensuring fresh script downloads
 - [Network Configuration](NETWORK_CONFIGURATION.md) - Container networking for RTAC connectivity
 
