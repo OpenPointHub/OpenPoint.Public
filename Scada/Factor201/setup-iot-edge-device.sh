@@ -70,6 +70,7 @@ show_menu() {
     echo -e "  ${GREEN}7${NC}) Helper Scripts - Download monitoring and log viewer scripts"
     echo ""
     echo -e "  ${GREEN}8${NC}) Clean Duplicate Config - Remove duplicate entries from previous runs"
+    echo -e "  ${GREEN}9${NC}) Configure Update Policy - Security-only, manual, or disable updates"
     echo ""
     echo -e "  ${YELLOW}0${NC}) Exit"
     echo ""
@@ -838,6 +839,259 @@ helper_scripts() {
     return 0
 }
 
+# Configure update policy
+configure_update_policy() {
+    echo -e "${BLUE}[UPDATE POLICY CONFIGURATION]${NC}"
+    echo ""
+    echo -e "${CYAN}Choose how system updates are handled:${NC}"
+    echo ""
+    echo -e "  ${GREEN}1${NC}) ${CYAN}Security-only automatic${NC} (recommended for production)"
+    echo "     • Critical security patches installed automatically"
+    echo "     • Feature updates require manual approval"
+    echo "     • Never auto-reboots (operator must reboot manually)"
+    echo "     • Email notification when updates applied"
+    echo ""
+    echo -e "  ${GREEN}2${NC}) ${CYAN}Manual updates only${NC} (maximum control)"
+    echo "     • All updates require manual trigger"
+    echo "     • Update via 'sudo apt update && sudo apt upgrade'"
+    echo "     • Or trigger remotely via IoT Hub"
+    echo "     • Best for critical systems or testing"
+    echo ""
+    echo -e "  ${GREEN}3${NC}) ${YELLOW}Disable all automatic updates${NC} (for testing only)"
+    echo "     • Completely disables automatic updates"
+    echo "     • System may become vulnerable over time"
+    echo "     • NOT recommended for production"
+    echo ""
+    echo -e "  ${GREEN}4${NC}) Show current policy"
+    echo ""
+    read -p "Select option (1-4): " choice
+    echo ""
+    
+    case $choice in
+        1)
+            echo -e "${GREEN}Configuring security-only automatic updates...${NC}"
+            echo ""
+            
+            # Wait for package manager
+            wait_for_package_manager || return 1
+            
+            # Install unattended-upgrades
+            echo "Installing unattended-upgrades package..."
+            apt-get install -y unattended-upgrades apt-listchanges 2>&1 | tail -5
+            
+            # Configure for security updates only
+            echo "Configuring for security updates only..."
+            cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
+// Automatic security updates for IoT Edge devices
+// Configuration for OpenPoint SCADA Polling Module
+
+Unattended-Upgrade::Allowed-Origins {
+    // Security updates only - no feature updates
+    "${distro_id}:${distro_codename}-security";
+    
+    // Commented out: feature/bug fix updates
+    // "${distro_id}:${distro_codename}-updates";
+};
+
+// Automatically get security updates
+Unattended-Upgrade::DevRelease "false";
+
+// Split upgrade into minimal steps (more reliable)
+Unattended-Upgrade::MinimalSteps "true";
+
+// Install updates on shutdown (safer than during operation)
+Unattended-Upgrade::InstallOnShutdown "false";
+
+// NEVER automatically reboot
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+
+// Email notification (configure your email)
+// Unattended-Upgrade::Mail "ops@openpoint.com";
+// Unattended-Upgrade::MailReport "on-change";
+
+// Remove unused kernel packages
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+// Automatically fix interrupted dpkg
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+
+// Log to syslog
+Unattended-Upgrade::SyslogEnable "true";
+Unattended-Upgrade::SyslogFacility "daemon";
+EOF
+            
+            # Configure update schedule (3 AM daily)
+            cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+// Update schedule for security patches
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+            
+            # Set specific time (3 AM)
+            systemctl edit --full --force apt-daily.timer > /dev/null 2>&1 <<'EOF'
+[Unit]
+Description=Daily apt download activities
+
+[Timer]
+OnCalendar=03:00
+RandomizedDelaySec=0
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+            
+            # Enable the service
+            systemctl enable unattended-upgrades > /dev/null 2>&1
+            systemctl start unattended-upgrades > /dev/null 2>&1
+            
+            echo ""
+            echo -e "${GREEN}✓ Security-only automatic updates enabled${NC}"
+            echo ""
+            echo "Configuration:"
+            echo "  • Security updates: Automatic (daily at 3 AM)"
+            echo "  • Feature updates: Manual"
+            echo "  • Auto-reboot: Disabled (never)"
+            echo "  • Email notifications: Disabled (uncomment in config to enable)"
+            echo ""
+            echo "To check for reboot requirement:"
+            echo "  cat /var/run/reboot-required.pkgs"
+            echo ""
+            echo "To view update logs:"
+            echo "  tail -100 /var/log/unattended-upgrades/unattended-upgrades.log"
+            ;;
+            
+        2)
+            echo -e "${GREEN}Configuring manual updates only...${NC}"
+            echo ""
+            
+            # Stop and disable automatic updates
+            systemctl stop unattended-upgrades 2>/dev/null || true
+            systemctl disable unattended-upgrades 2>/dev/null || true
+            systemctl stop apt-daily.timer 2>/dev/null || true
+            systemctl disable apt-daily.timer 2>/dev/null || true
+            systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
+            systemctl disable apt-daily-upgrade.timer 2>/dev/null || true
+            
+            echo -e "${GREEN}✓ Automatic updates disabled${NC}"
+            echo ""
+            echo "All updates now require manual action:"
+            echo ""
+            echo "Option 1: Local manual update"
+            echo "  sudo apt update && sudo apt upgrade -y"
+            echo ""
+            echo "Option 2: Use setup script Option 3"
+            echo "  sudo bash ./setup-iot-edge-device.sh"
+            echo "  (then select option 3)"
+            echo ""
+            echo "Option 3: Remote trigger via IoT Hub"
+            echo "  (requires implementing RunSystemUpdate direct method)"
+            echo ""
+            ;;
+            
+        3)
+            echo -e "${YELLOW}Disabling all automatic updates...${NC}"
+            echo ""
+            
+            # Stop and disable everything
+            systemctl stop unattended-upgrades 2>/dev/null || true
+            systemctl disable unattended-upgrades 2>/dev/null || true
+            systemctl mask unattended-upgrades 2>/dev/null || true
+            systemctl stop apt-daily.timer 2>/dev/null || true
+            systemctl disable apt-daily.timer 2>/dev/null || true
+            systemctl mask apt-daily.timer 2>/dev/null || true
+            systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
+            systemctl disable apt-daily-upgrade.timer 2>/dev/null || true
+            systemctl mask apt-daily-upgrade.timer 2>/dev/null || true
+            
+            echo -e "${YELLOW}✓ All automatic updates disabled${NC}"
+            echo ""
+            echo -e "${RED}⚠️  WARNING: System will not receive security updates automatically${NC}"
+            echo ""
+            echo "You must manually update the system regularly:"
+            echo "  sudo apt update && sudo apt upgrade -y"
+            echo ""
+            echo -e "${YELLOW}This configuration is NOT recommended for production systems.${NC}"
+            ;;
+            
+        4)
+            echo -e "${CYAN}Current Update Policy:${NC}"
+            echo ""
+            
+            # Check unattended-upgrades status
+            if systemctl is-enabled unattended-upgrades &>/dev/null; then
+                echo -e "  ${GREEN}✓${NC} unattended-upgrades: enabled"
+                
+                if systemctl is-active unattended-upgrades &>/dev/null; then
+                    echo -e "  ${GREEN}✓${NC} Service status: active"
+                else
+                    echo -e "  ${YELLOW}⚠${NC} Service status: inactive"
+                fi
+                
+                # Show configured sources
+                if [ -f /etc/apt/apt.conf.d/50unattended-upgrades ]; then
+                    echo ""
+                    echo "  Allowed update sources:"
+                    grep "Allowed-Origins" -A 10 /etc/apt/apt.conf.d/50unattended-upgrades | \
+                        grep "${distro_id}" | sed 's/^/    /'
+                fi
+                
+                # Show auto-reboot setting
+                if grep -q "Automatic-Reboot.*true" /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
+                    echo -e "  ${YELLOW}⚠${NC} Auto-reboot: enabled"
+                else
+                    echo -e "  ${GREEN}✓${NC} Auto-reboot: disabled"
+                fi
+            else
+                echo -e "  ${YELLOW}⚠${NC} unattended-upgrades: disabled"
+                echo "    All updates require manual action"
+            fi
+            
+            # Check scheduled update timers
+            echo ""
+            echo "  Scheduled update timers:"
+            if systemctl is-active apt-daily.timer &>/dev/null; then
+                NEXT_RUN=$(systemctl status apt-daily.timer 2>/dev/null | grep "Trigger:" | awk '{print $2, $3, $4}')
+                echo -e "  ${GREEN}✓${NC} apt-daily.timer: active (next: ${NEXT_RUN})"
+            else
+                echo -e "  ${YELLOW}⚠${NC} apt-daily.timer: inactive"
+            fi
+            
+            # Check for pending updates
+            echo ""
+            echo "  Checking for available updates..."
+            apt-get update -qq 2>&1 > /dev/null
+            UPDATES=$(apt list --upgradable 2>/dev/null | grep -v "Listing" | wc -l)
+            
+            if [ "$UPDATES" -gt 0 ]; then
+                echo -e "  ${YELLOW}⚠${NC} Updates available: ${UPDATES}"
+                echo "    Run 'apt list --upgradable' to see details"
+            else
+                echo -e "  ${GREEN}✓${NC} System is up to date"
+            fi
+            
+            # Check reboot status
+            if [ -f /var/run/reboot-required ]; then
+                echo ""
+                echo -e "  ${YELLOW}⚠${NC} Reboot required after previous updates"
+                echo "    Packages requiring reboot:"
+                cat /var/run/reboot-required.pkgs | sed 's/^/      /'
+            fi
+            
+            echo ""
+            ;;
+            
+        *)
+            echo -e "${RED}Invalid option${NC}"
+            return 1
+            ;;
+    esac
+}
+
 # Full setup
 full_setup() {
     echo -e "${CYAN}════════════════════════════════════════════${NC}"
@@ -1012,6 +1266,10 @@ main() {
             8)
                 cleanup_duplicates
                 echo -e "${GREEN}✓ Cleanup complete${NC}"
+                read -p "Press ENTER to return to menu..." dummy
+                ;;
+            9)
+                configure_update_policy
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             0)
