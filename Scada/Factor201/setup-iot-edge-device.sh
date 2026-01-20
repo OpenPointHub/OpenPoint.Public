@@ -649,22 +649,81 @@ iotedge_runtime() {
     echo -e "${BLUE}[STEP 5] IoT Edge Runtime Installation${NC}"
     echo ""
     
+    # Temporarily disable exit-on-error for this function
+    set +e
+    
     # Install IoT Edge
     echo -e "${GREEN}[1/2] Installing Azure IoT Edge Runtime...${NC}"
     if command -v iotedge &> /dev/null; then
         echo "  ✓ IoT Edge already installed ($(iotedge --version))"
     else
         # Wait for package manager
-        wait_for_package_manager || return 1
+        wait_for_package_manager
+        if [ $? -ne 0 ]; then
+            set -e
+            return 1
+        fi
         
+        echo "  Adding Microsoft package repository (if not already added)..."
         UBUNTU_VERSION=$(lsb_release -rs)
-        wget -q https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
-        dpkg -i packages-microsoft-prod.deb > /dev/null 2>&1
-        rm packages-microsoft-prod.deb
-        apt-get update --fix-missing > /dev/null 2>&1
-        apt-get install -y --fix-missing aziot-edge defender-iot-micro-agent-edge > /dev/null 2>&1
-        echo "  ✓ IoT Edge runtime installed"
-        echo "  ✓ Microsoft Defender for IoT installed"
+        
+        # Check if Microsoft repo is already configured
+        if [ ! -f /etc/apt/sources.list.d/microsoft-prod.list ]; then
+            wget -q https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+            dpkg -i packages-microsoft-prod.deb 2>&1 | tail -5
+            local dpkg_result=$?
+            rm packages-microsoft-prod.deb
+            
+            if [ $dpkg_result -eq 0 ]; then
+                echo "  ✓ Microsoft repository added"
+            else
+                echo -e "${YELLOW}  ⚠ Repository may already be configured${NC}"
+            fi
+        else
+            echo "  ✓ Microsoft repository already configured"
+        fi
+        
+        echo ""
+        echo "  Updating package lists..."
+        apt-get update --fix-missing 2>&1 | tail -5
+        
+        echo ""
+        echo "  Installing Azure IoT Edge Runtime (this may take a few minutes)..."
+        apt-get install -y --fix-missing aziot-edge defender-iot-micro-agent-edge 2>&1 | tee /tmp/iotedge-install.log | tail -15
+        local install_result=$?
+        
+        if [ $install_result -eq 0 ]; then
+            echo ""
+            echo "  ✓ IoT Edge runtime installed"
+            echo "  ✓ Microsoft Defender for IoT installed"
+        else
+            echo ""
+            echo -e "${RED}  ✗ Failed to install IoT Edge runtime (exit code: $install_result)${NC}"
+            echo ""
+            echo "Last 30 lines of installation log:"
+            tail -30 /tmp/iotedge-install.log
+            echo ""
+            echo "Diagnostic commands to run:"
+            echo "  apt-cache policy aziot-edge"
+            echo "  apt-cache policy defender-iot-micro-agent-edge"
+            echo "  cat /tmp/iotedge-install.log"
+            echo ""
+            echo "Microsoft repository should provide IoT Edge for Ubuntu ${UBUNTU_VERSION}"
+            set -e
+            return 1
+        fi
+        
+        # Verify IoT Edge installation
+        echo ""
+        echo "  Verifying IoT Edge installation..."
+        if command -v iotedge &> /dev/null; then
+            IOTEDGE_VERSION=$(iotedge --version 2>/dev/null || echo "unknown")
+            echo "  ✓ IoT Edge command available: ${IOTEDGE_VERSION}"
+        else
+            echo -e "${RED}  ✗ IoT Edge command not found after installation${NC}"
+            set -e
+            return 1
+        fi
     fi
     
     # Install TPM tools
@@ -672,16 +731,30 @@ iotedge_runtime() {
     echo -e "${GREEN}[2/2] Installing TPM 2.0 tools...${NC}"
     if ! command -v tpm2_getcap &> /dev/null; then
         # Wait for package manager again
-        wait_for_package_manager || return 1
+        wait_for_package_manager
+        if [ $? -ne 0 ]; then
+            set -e
+            return 1
+        fi
         
-        apt-get install -y --fix-missing tpm2-tools > /dev/null 2>&1
-        echo "  ✓ TPM 2.0 tools installed"
+        echo "  Installing tpm2-tools..."
+        apt-get install -y --fix-missing tpm2-tools 2>&1 | tee /tmp/tpm-install.log | tail -10
+        local tpm_install_result=$?
+        
+        if [ $tpm_install_result -eq 0 ]; then
+            echo "  ✓ TPM 2.0 tools installed"
+        else
+            echo -e "${YELLOW}  ⚠ Failed to install TPM tools (exit code: $tpm_install_result)${NC}"
+            echo "  This is optional - IoT Edge can work without TPM"
+            echo "  Log saved to: /tmp/tpm-install.log"
+        fi
     else
         echo "  ✓ TPM 2.0 tools already installed"
     fi
     
     # Check for TPM device
     echo ""
+    echo "  Checking for TPM device..."
     if ls /dev/tpm* &> /dev/null 2>&1; then
         echo "  ✓ TPM device detected: $(ls /dev/tpm* 2>/dev/null | tr '\n' ' ')"
     else
@@ -689,8 +762,12 @@ iotedge_runtime() {
         echo "  ℹ️  Will use connection string fallback for provisioning"
     fi
     
+    # Re-enable exit-on-error
+    set -e
+    
     echo ""
     echo -e "${GREEN}✓ IoT Edge runtime ready${NC}"
+    return 0
 }
 
 # Download helper scripts
@@ -698,14 +775,24 @@ helper_scripts() {
     echo -e "${BLUE}[STEP 6] Downloading Helper Scripts${NC}"
     echo ""
     
+    # Temporarily disable exit-on-error for this function
+    set +e
+    
     BASE_URL="https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201"
     
     # TPM key extractor (if TPM present)
     if ls /dev/tpm* &> /dev/null 2>&1; then
         echo -e "${GREEN}[1/3] Downloading TPM key extraction helper...${NC}"
         wget -q ${BASE_URL}/get-tpm-key.sh -O /usr/local/bin/get-tpm-key.sh
-        chmod +x /usr/local/bin/get-tpm-key.sh
-        echo "  ✓ Created: get-tpm-key.sh"
+        local wget_result=$?
+        
+        if [ $wget_result -eq 0 ]; then
+            chmod +x /usr/local/bin/get-tpm-key.sh
+            echo "  ✓ Created: get-tpm-key.sh"
+        else
+            echo -e "${RED}  ✗ Failed to download get-tpm-key.sh (exit code: $wget_result)${NC}"
+            echo "  Check internet connection or URL: ${BASE_URL}/get-tpm-key.sh"
+        fi
     else
         echo -e "${YELLOW}[1/3] Skipping TPM helper (no TPM device)${NC}"
     fi
@@ -714,18 +801,40 @@ helper_scripts() {
     echo ""
     echo -e "${GREEN}[2/3] Downloading system monitoring script...${NC}"
     wget -q ${BASE_URL}/iot-monitor.sh -O /usr/local/bin/iot-monitor.sh
-    chmod +x /usr/local/bin/iot-monitor.sh
-    echo "  ✓ Created: iot-monitor.sh"
+    local wget_result=$?
+    
+    if [ $wget_result -eq 0 ]; then
+        chmod +x /usr/local/bin/iot-monitor.sh
+        echo "  ✓ Created: iot-monitor.sh"
+    else
+        echo -e "${RED}  ✗ Failed to download iot-monitor.sh (exit code: $wget_result)${NC}"
+        echo "  Check internet connection or URL: ${BASE_URL}/iot-monitor.sh"
+        set -e
+        return 1
+    fi
     
     # Log viewer
     echo ""
     echo -e "${GREEN}[3/3] Downloading SCADA log viewer...${NC}"
     wget -q ${BASE_URL}/scada-logs.sh -O /usr/local/bin/scada-logs.sh
-    chmod +x /usr/local/bin/scada-logs.sh
-    echo "  ✓ Created: scada-logs.sh"
+    local wget_result=$?
+    
+    if [ $wget_result -eq 0 ]; then
+        chmod +x /usr/local/bin/scada-logs.sh
+        echo "  ✓ Created: scada-logs.sh"
+    else
+        echo -e "${RED}  ✗ Failed to download scada-logs.sh (exit code: $wget_result)${NC}"
+        echo "  Check internet connection or URL: ${BASE_URL}/scada-logs.sh"
+        set -e
+        return 1
+    fi
+    
+    # Re-enable exit-on-error
+    set -e
     
     echo ""
     echo -e "${GREEN}✓ Helper scripts ready${NC}"
+    return 0
 }
 
 # Full setup

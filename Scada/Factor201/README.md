@@ -370,7 +370,8 @@ These scripts are part of the OpenPoint SCADA system.
 ## 📚 **Additional Documentation**
 
 - [Quick Troubleshooting Guide](QUICK_TROUBLESHOOTING.md) - Fast solutions for common issues
-- [Setup Improvements](SETUP_IMPROVEMENTS.md) - Technical details on unattended-upgrades handling
+- [Error Handling Improvements](ERROR_HANDLING_IMPROVEMENTS.md) - Comprehensive error handling details
+- [Cache-Busting Guide](CACHE_BUSTING.md) - Ensuring fresh script downloads
 - [Network Configuration](NETWORK_CONFIGURATION.md) - Container networking for RTAC connectivity
 
 ---
