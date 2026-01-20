@@ -561,7 +561,7 @@ container_engine() {
         sleep 2
     fi
     
-    if systemctl is_active --quiet docker; then
+    if systemctl is-active --quiet docker; then
         echo "  ✓ Docker service is active"
     else
         echo -e "${RED}  ✗ Docker service failed to start${NC}"
