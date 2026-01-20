@@ -4,7 +4,6 @@
 # Ubuntu Server Optimization Script for Raspberry Pi Factor 201
 # Hardware: 4GB RAM, 128GB SSD
 # Purpose: Prepare system for OpenPoint SCADA Polling IoT Edge Module
-# Repository: https://github.com/OpenPointHub/OpenPoint.Public
 ###############################################################################
 
 set -e  # Exit on error
@@ -16,38 +15,6 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
-
-# Base URL for modules
-BASE_URL="https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/modules"
-
-# Module cache directory (persistent location)
-MODULE_CACHE_DIR="/usr/local/share/openpoint-setup/modules"
-
-# Download and source a module
-source_module() {
-    local module_name=$1
-    local module_file="${MODULE_CACHE_DIR}/${module_name}.sh"
-    
-    # Create cache directory if it doesn't exist
-    mkdir -p "${MODULE_CACHE_DIR}"
-    
-    # Download module if not cached or force refresh
-    if [ ! -f "${module_file}" ] || [ "${FORCE_REFRESH:-false}" = "true" ]; then
-        echo -e "${CYAN}  → Downloading ${module_name}...${NC}"
-        wget -q ${BASE_URL}/${module_name}.sh -O ${module_file} 2>/dev/null || {
-            echo -e "${RED}✗ Failed to download ${module_name}${NC}"
-            return 1
-        }
-        chmod +x ${module_file}
-    else
-        echo -e "${GREEN}  ✓ Using cached ${module_name}${NC}"
-    fi
-    
-    # Source the module with colors available
-    export RED GREEN YELLOW BLUE CYAN NC
-    source ${module_file}
-    return 0
-}
 
 # Function to show menu
 show_menu() {
@@ -69,7 +36,6 @@ show_menu() {
     echo -e "  ${GREEN}7${NC}) Helper Scripts - Download monitoring and log viewer scripts"
     echo ""
     echo -e "  ${GREEN}8${NC}) Clean Duplicate Config - Remove duplicate entries from previous runs"
-    echo -e "  ${GREEN}9${NC}) Refresh Module Cache - Re-download all setup modules"
     echo ""
     echo -e "  ${YELLOW}0${NC}) Exit"
     echo ""
@@ -118,56 +84,6 @@ cleanup_duplicates() {
     echo ""
 }
 
-# Refresh module cache
-refresh_module_cache() {
-    echo -e "${BLUE}Refreshing Module Cache${NC}"
-    echo ""
-    echo "This will re-download all setup modules to get the latest versions."
-    echo ""
-    read -p "Continue? (y/N): " REPLY
-    echo
-    
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Refresh cancelled."
-        return 0
-    fi
-    
-    echo -e "${CYAN}Removing cached modules...${NC}"
-    if [ -d "${MODULE_CACHE_DIR}" ]; then
-        rm -rf "${MODULE_CACHE_DIR}"
-        echo -e "${GREEN}  ✓ Cache cleared${NC}"
-    else
-        echo -e "${YELLOW}  ℹ️  No cache to clear${NC}"
-    fi
-    
-    echo ""
-    echo -e "${CYAN}Downloading fresh modules...${NC}"
-    export FORCE_REFRESH=true
-    
-    local modules=("system-config" "system-updates" "system-optimization" "container-engine" "iotedge-runtime" "helper-scripts")
-    local success=0
-    local failed=0
-    
-    for module in "${modules[@]}"; do
-        if source_module "$module" > /dev/null 2>&1; then
-            ((success++))
-        else
-            ((failed++))
-            echo -e "${RED}  ✗ Failed to download ${module}${NC}"
-        fi
-    done
-    
-    unset FORCE_REFRESH
-    
-    echo ""
-    echo -e "${GREEN}✓ Module cache refreshed${NC}"
-    echo "  Downloaded: ${success} modules"
-    if [ $failed -gt 0 ]; then
-        echo -e "${YELLOW}  Failed: ${failed} modules${NC}"
-    fi
-    echo ""
-}
-
 # Check if IoT Edge is already installed
 check_iotedge_installed() {
     if command -v iotedge &> /dev/null; then
@@ -197,6 +113,359 @@ check_iotedge_installed() {
     return 0
 }
 
+# System configuration (keyboard, timezone, locale, hardware detection)
+system_configuration() {
+    echo -e "${BLUE}[STEP 1] System Configuration${NC}"
+    echo ""
+    
+    # Configure keyboard layout to US
+    echo -e "${GREEN}[1/4] Configuring keyboard layout to US...${NC}"
+    cat > /etc/default/keyboard <<EOF
+XKBMODEL="pc105"
+XKBLAYOUT="us"
+XKBVARIANT=""
+XKBOPTIONS=""
+BACKSPACE="guess"
+EOF
+    loadkeys us 2>/dev/null || true
+    echo "  ✓ Keyboard layout set to US"
+    
+    # Set timezone to UTC
+    echo ""
+    echo -e "${GREEN}[2/4] Setting timezone to UTC...${NC}"
+    timedatectl set-timezone UTC
+    echo "  ✓ Timezone set to UTC"
+    
+    # Configure locale to en_US.UTF-8
+    echo ""
+    echo -e "${GREEN}[3/4] Configuring locale to en_US.UTF-8...${NC}"
+    locale-gen en_US.UTF-8 > /dev/null 2>&1
+    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 > /dev/null 2>&1
+    echo "  ✓ Locale set to en_US.UTF-8"
+    
+    # Detect hardware
+    echo ""
+    echo -e "${GREEN}[4/4] Detecting hardware...${NC}"
+    TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
+    DISK_SIZE=$(df -BG / | awk 'NR==2 {print $2}' | sed 's/G//')
+    ARCH=$(uname -m)
+    
+    echo "  💾 RAM: ${TOTAL_RAM}MB"
+    echo "  💿 Disk: ${DISK_SIZE}GB"
+    echo "  🖥️  Architecture: ${ARCH}"
+    
+    if [[ $TOTAL_RAM -lt 3800 ]]; then
+        echo -e "${YELLOW}  ⚠ Warning: Less than 4GB RAM detected. Optimizations may need adjustment.${NC}"
+    fi
+    
+    if [[ $ARCH != "aarch64" && $ARCH != "arm64" ]]; then
+        echo -e "${YELLOW}  ⚠ Warning: Not ARM64 architecture. Some optimizations may not apply.${NC}"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}✓ System configuration complete${NC}"
+}
+
+# System updates and package installation
+system_updates() {
+    echo -e "${BLUE}[STEP 2] System Updates & Package Installation${NC}"
+    echo ""
+    
+    # Update system
+    echo -e "${GREEN}[1/3] Updating system packages...${NC}"
+    apt-get update --fix-missing > /dev/null 2>&1 || apt-get update --fix-missing
+    apt-get upgrade -y --fix-missing > /dev/null 2>&1
+    echo "  ✓ System packages updated"
+    
+    # Install essential packages
+    echo ""
+    echo -e "${GREEN}[2/3] Installing essential packages...${NC}"
+    apt-get install -y --fix-missing \
+        curl wget git ca-certificates gnupg lsb-release \
+        smartmontools iotop htop net-tools iftop > /dev/null 2>&1
+    echo "  ✓ Essential packages installed"
+    
+    # Remove unnecessary services
+    echo ""
+    echo -e "${GREEN}[3/3] Disabling unnecessary services...${NC}"
+    systemctl stop bluetooth 2>/dev/null || true
+    systemctl disable bluetooth 2>/dev/null || true
+    systemctl stop ModemManager 2>/dev/null || true
+    systemctl disable ModemManager 2>/dev/null || true
+    systemctl stop cups 2>/dev/null || true
+    systemctl disable cups 2>/dev/null || true
+    
+    # Disable cloud-init
+    if command -v cloud-init &> /dev/null; then
+        touch /etc/cloud/cloud-init.disabled
+        systemctl disable cloud-init 2>/dev/null || true
+        systemctl disable cloud-config 2>/dev/null || true
+        systemctl disable cloud-final 2>/dev/null || true
+        systemctl disable cloud-init-local 2>/dev/null || true
+        
+        # Clean up cloud-init network configuration
+        if [ -f /etc/netplan/50-cloud-init.yaml ]; then
+            rm -f /etc/netplan/50-cloud-init.yaml
+            cat > /etc/netplan/01-netcfg.yaml <<'NETEOF'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    all-eth:
+      match:
+        name: "e*"
+      dhcp4: true
+      dhcp6: false
+      optional: true
+NETEOF
+            netplan generate > /dev/null 2>&1
+        fi
+    fi
+    
+    echo "  ✓ Disabled: Bluetooth, ModemManager, CUPS, cloud-init"
+    echo ""
+    echo -e "${GREEN}✓ System updates complete${NC}"
+}
+
+# System optimizations
+system_optimization() {
+    echo -e "${BLUE}[STEP 3] System Optimization${NC}"
+    echo ""
+    
+    # Optimize swap settings
+    echo -e "${GREEN}[1/5] Optimizing swap settings...${NC}"
+    if ! grep -q "vm.swappiness=10" /etc/sysctl.conf; then
+        echo "vm.swappiness=10" >> /etc/sysctl.conf
+    fi
+    if ! grep -q "vm.vfs_cache_pressure=50" /etc/sysctl.conf; then
+        echo "vm.vfs_cache_pressure=50" >> /etc/sysctl.conf
+    fi
+    sysctl -p > /dev/null 2>&1
+    echo "  ✓ Swappiness set to 10 (prefer RAM over swap)"
+    
+    # Enable SSD TRIM
+    echo ""
+    echo -e "${GREEN}[2/5] Enabling SSD TRIM...${NC}"
+    systemctl enable fstrim.timer > /dev/null 2>&1
+    systemctl start fstrim.timer > /dev/null 2>&1
+    echo "  ✓ Weekly TRIM scheduled"
+    
+    # Enable hardware watchdog
+    echo ""
+    echo -e "${GREEN}[3/5] Enabling hardware watchdog...${NC}"
+    if ! lsmod | grep -q bcm2835_wdt; then
+        modprobe bcm2835_wdt 2>/dev/null || true
+    fi
+    if ! grep -q "bcm2835_wdt" /etc/modules 2>/dev/null; then
+        echo "bcm2835_wdt" >> /etc/modules
+    fi
+    apt-get install -y --fix-missing watchdog > /dev/null 2>&1
+    cat > /etc/watchdog.conf <<EOF
+watchdog-device = /dev/watchdog
+watchdog-timeout = 15
+max-load-1 = 24
+allocatable-memory = 1
+realtime = yes
+priority = 1
+EOF
+    systemctl enable watchdog > /dev/null 2>&1
+    systemctl start watchdog > /dev/null 2>&1
+    echo "  ✓ Hardware watchdog enabled"
+    
+    # Increase file descriptors
+    echo ""
+    echo -e "${GREEN}[4/5] Increasing file descriptor limits...${NC}"
+    if ! grep -q "soft nofile 65535" /etc/security/limits.conf; then
+        cat >> /etc/security/limits.conf <<EOF
+* soft nofile 65535
+* hard nofile 65535
+root soft nofile 65535
+root hard nofile 65535
+EOF
+        echo "  ✓ File descriptor limit: 65535"
+    else
+        echo "  ✓ File descriptor limits already configured"
+    fi
+    
+    # Network optimizations
+    echo ""
+    echo -e "${GREEN}[5/5] Applying network optimizations...${NC}"
+    if ! grep -q "Network optimizations for IoT Edge workloads" /etc/sysctl.conf; then
+        cat >> /etc/sysctl.conf <<EOF
+
+# Network optimizations for IoT Edge workloads
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.tcp_rmem=4096 87380 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+net.ipv4.tcp_fin_timeout=15
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_keepalive_time=600
+net.ipv4.tcp_keepalive_probes=3
+net.ipv4.tcp_keepalive_intvl=15
+EOF
+        echo "  ✓ Network buffers increased"
+    else
+        echo "  ✓ Network optimizations already configured"
+    fi
+    sysctl -p > /dev/null 2>&1
+    
+    echo ""
+    echo -e "${GREEN}✓ System optimization complete${NC}"
+}
+
+# Container engine installation
+container_engine() {
+    echo -e "${BLUE}[STEP 4] Container Engine Installation${NC}"
+    echo ""
+    
+    # Install Moby
+    echo -e "${GREEN}[1/2] Installing Moby container engine...${NC}"
+    if command -v docker &> /dev/null; then
+        DOCKER_VERSION=$(docker --version)
+        echo "  ✓ Container engine already installed (${DOCKER_VERSION})"
+    else
+        apt-get update --fix-missing > /dev/null 2>&1
+        apt-get install -y --fix-missing moby-engine moby-cli > /dev/null 2>&1
+        systemctl start docker
+        systemctl enable docker > /dev/null 2>&1
+        echo "  ✓ Moby container engine installed"
+    fi
+    
+    # Configure Docker
+    echo ""
+    echo -e "${GREEN}[2/2] Configuring container engine...${NC}"
+    mkdir -p /etc/docker
+    
+    if [ -f /etc/docker/daemon.json ]; then
+        if ! grep -q '"log-driver": "local"' /etc/docker/daemon.json; then
+            cp /etc/docker/daemon.json /etc/docker/daemon.json.backup.$(date +%Y%m%d_%H%M%S)
+            cat > /etc/docker/daemon.json <<EOF
+{
+  "log-driver": "local",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  },
+  "storage-driver": "overlay2",
+  "default-ulimits": {
+    "nofile": {
+      "Name": "nofile",
+      "Hard": 65536,
+      "Soft": 65536
+    }
+  }
+}
+EOF
+            systemctl restart docker
+            echo "  ✓ Docker reconfigured for IoT Edge"
+        else
+            echo "  ✓ Docker already configured for IoT Edge"
+        fi
+    else
+        cat > /etc/docker/daemon.json <<EOF
+{
+  "log-driver": "local",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  },
+  "storage-driver": "overlay2",
+  "default-ulimits": {
+    "nofile": {
+      "Name": "nofile",
+      "Hard": 65536,
+      "Soft": 65536
+    }
+  }
+}
+EOF
+        systemctl restart docker
+        echo "  ✓ Container engine configured"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}✓ Container engine ready${NC}"
+}
+
+# IoT Edge runtime installation
+iotedge_runtime() {
+    echo -e "${BLUE}[STEP 5] IoT Edge Runtime Installation${NC}"
+    echo ""
+    
+    # Install IoT Edge
+    echo -e "${GREEN}[1/2] Installing Azure IoT Edge Runtime...${NC}"
+    if command -v iotedge &> /dev/null; then
+        echo "  ✓ IoT Edge already installed ($(iotedge --version))"
+    else
+        UBUNTU_VERSION=$(lsb_release -rs)
+        wget -q https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+        dpkg -i packages-microsoft-prod.deb > /dev/null 2>&1
+        rm packages-microsoft-prod.deb
+        apt-get update --fix-missing > /dev/null 2>&1
+        apt-get install -y --fix-missing aziot-edge defender-iot-micro-agent-edge > /dev/null 2>&1
+        echo "  ✓ IoT Edge runtime installed"
+        echo "  ✓ Microsoft Defender for IoT installed"
+    fi
+    
+    # Install TPM tools
+    echo ""
+    echo -e "${GREEN}[2/2] Installing TPM 2.0 tools...${NC}"
+    if ! command -v tpm2_getcap &> /dev/null; then
+        apt-get install -y --fix-missing tpm2-tools > /dev/null 2>&1
+        echo "  ✓ TPM 2.0 tools installed"
+    else
+        echo "  ✓ TPM 2.0 tools already installed"
+    fi
+    
+    # Check for TPM device
+    echo ""
+    if ls /dev/tpm* &> /dev/null 2>&1; then
+        echo "  ✓ TPM device detected: $(ls /dev/tpm* 2>/dev/null | tr '\n' ' ')"
+    else
+        echo -e "${YELLOW}  ⚠ No TPM device found${NC}"
+        echo "  ℹ️  Will use connection string fallback for provisioning"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}✓ IoT Edge runtime ready${NC}"
+}
+
+# Download helper scripts
+helper_scripts() {
+    echo -e "${BLUE}[STEP 6] Downloading Helper Scripts${NC}"
+    echo ""
+    
+    BASE_URL="https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201"
+    
+    # TPM key extractor (if TPM present)
+    if ls /dev/tpm* &> /dev/null 2>&1; then
+        echo -e "${GREEN}[1/3] Downloading TPM key extraction helper...${NC}"
+        wget -q ${BASE_URL}/get-tpm-key.sh -O /usr/local/bin/get-tpm-key.sh
+        chmod +x /usr/local/bin/get-tpm-key.sh
+        echo "  ✓ Created: get-tpm-key.sh"
+    else
+        echo -e "${YELLOW}[1/3] Skipping TPM helper (no TPM device)${NC}"
+    fi
+    
+    # System monitor
+    echo ""
+    echo -e "${GREEN}[2/3] Downloading system monitoring script...${NC}"
+    wget -q ${BASE_URL}/iot-monitor.sh -O /usr/local/bin/iot-monitor.sh
+    chmod +x /usr/local/bin/iot-monitor.sh
+    echo "  ✓ Created: iot-monitor.sh"
+    
+    # Log viewer
+    echo ""
+    echo -e "${GREEN}[3/3] Downloading SCADA log viewer...${NC}"
+    wget -q ${BASE_URL}/scada-logs.sh -O /usr/local/bin/scada-logs.sh
+    chmod +x /usr/local/bin/scada-logs.sh
+    echo "  ✓ Created: scada-logs.sh"
+    
+    echo ""
+    echo -e "${GREEN}✓ Helper scripts ready${NC}"
+}
+
 # Full setup
 full_setup() {
     echo -e "${CYAN}════════════════════════════════════════════${NC}"
@@ -208,30 +477,27 @@ full_setup() {
     check_iotedge_installed || return 1
     cleanup_duplicates
     
-    # Download and execute each module
-    echo -e "${CYAN}Downloading setup modules...${NC}"
-    
-    source_module "system-config" && system_configuration
+    system_configuration
     echo ""
     read -p "Press ENTER to continue..." dummy
     
-    source_module "system-updates" && system_updates
+    system_updates
     echo ""
     read -p "Press ENTER to continue..." dummy
     
-    source_module "system-optimization" && system_optimization
+    system_optimization
     echo ""
     read -p "Press ENTER to continue..." dummy
     
-    source_module "container-engine" && container_engine
+    container_engine
     echo ""
     read -p "Press ENTER to continue..." dummy
     
-    source_module "iotedge-runtime" && iotedge_runtime
+    iotedge_runtime
     echo ""
     read -p "Press ENTER to continue..." dummy
     
-    source_module "helper-scripts" && helper_scripts
+    helper_scripts
     
     # Show completion summary
     echo ""
@@ -280,28 +546,28 @@ main() {
                 ;;
             2)
                 show_requirements
-                source_module "system-config" && system_configuration
+                system_configuration
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             3)
-                source_module "system-updates" && system_updates
+                system_updates
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             4)
-                source_module "system-optimization" && system_optimization
+                system_optimization
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             5)
-                source_module "container-engine" && container_engine
+                container_engine
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             6)
                 check_iotedge_installed || continue
-                source_module "iotedge-runtime" && iotedge_runtime
+                iotedge_runtime
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             7)
-                source_module "helper-scripts" && helper_scripts
+                helper_scripts
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             8)
@@ -309,14 +575,8 @@ main() {
                 echo -e "${GREEN}✓ Cleanup complete${NC}"
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
-            9)
-                refresh_module_cache
-                read -p "Press ENTER to return to menu..." dummy
-                ;;
             0)
                 echo "Exiting..."
-                # Cleanup any remaining temp files
-                rm -f /tmp/{system-config,system-updates,system-optimization,container-engine,iotedge-runtime,helper-scripts}.sh
                 exit 0
                 ;;
             *)
