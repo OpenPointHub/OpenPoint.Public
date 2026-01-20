@@ -284,8 +284,9 @@ EOF
     echo "  💿 Disk: ${DISK_SIZE}GB"
     echo "  🖥️  Architecture: ${ARCH}"
     
-    if [[ $TOTAL_RAM -lt 3800 ]]; then
-        echo -e "${YELLOW}  ⚠ Warning: Less than 4GB RAM detected. Optimizations may need adjustment.${NC}"
+    # 4GB RAM shows as ~3700-3900MB due to system reserved memory
+    if [[ $TOTAL_RAM -lt 3600 ]]; then
+        echo -e "${YELLOW}  ⚠ Warning: Less than 4GB RAM detected (${TOTAL_RAM}MB). Optimizations may need adjustment.${NC}"
     fi
     
     if [[ $ARCH != "aarch64" && $ARCH != "arm64" ]]; then
