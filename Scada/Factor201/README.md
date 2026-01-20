@@ -221,64 +221,84 @@ scada-logs.sh
 
 ## 🐛 **Troubleshooting**
 
-### **Script Download Fails**
+### Script Stops Unexpectedly
+
+**Symptoms:**
+- Script returns to menu without completing a step
+- No error message shown
+- Silent failure during package updates
+
+**Solution 1: Run in Debug Mode**
 ```bash
-# Check internet connectivity
+# Enable verbose output to see what's failing
+DEBUG_MODE=1 sudo bash ./setup-iot-edge-device.sh
+```
+
+This will show all command output including errors that are normally hidden.
+
+**Solution 2: Run Steps Individually**
+```bash
+# Instead of "Full Setup", run each step separately
+sudo bash ./setup-iot-edge-device.sh
+# Choose option 2 (System Configuration)
+# If it works, continue to option 3, etc.
+```
+
+**Solution 3: Check System Logs**
+```bash
+# Check for system errors
+sudo journalctl -xe
+
+# Check for package manager locks
+sudo lsof /var/lib/dpkg/lock-frontend
+sudo lsof /var/lib/apt/lists/lock
+```
+
+### Common Errors
+
+**"dpkg lock" or "Unable to acquire lock"**
+
+Another package manager is running. Wait for it to finish or kill it:
+```bash
+# Check what's using apt
+ps aux | grep apt
+
+# Wait for automatic updates to finish
+sudo systemctl stop apt-daily.timer
+sudo systemctl stop apt-daily-upgrade.timer
+
+# Run script again
+sudo bash ./setup-iot-edge-device.sh
+```
+
+**"Network unreachable" during package install**
+
+Check internet connectivity:
+```bash
 ping -c 3 8.8.8.8
+ping -c 3 packages.microsoft.com
 
-# Try downloading with verbose output
-wget -v https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/setup-iot-edge-device.sh
+# Check DNS
+cat /etc/resolv.conf
 ```
 
-### **IoT Edge Not Starting**
+**Script fails at Step 2 (System Updates)**
+
+The package repository might be updating. Try again in 5 minutes, or run in debug mode to see the specific error.
+
+### Getting Help
+
+If the script fails, collect this information:
+
 ```bash
-sudo iotedge system status
-sudo iotedge system logs
-sudo iotedge check
+# 1. Run in debug mode and save output
+DEBUG_MODE=1 sudo bash ./setup-iot-edge-device.sh 2>&1 | tee setup-debug.log
+
+# 2. System information
+uname -a > system-info.txt
+lsb_release -a >> system-info.txt
+free -h >> system-info.txt
+df -h >> system-info.txt
+
+# 3. Send both files to support
 ```
-
-### **Module Not Deploying**
-```bash
-scada-logs.sh  # Choose option 4 or 5 for errors
-sudo iotedge list
-```
-
-## 📊 **System Requirements**
-
-- **Device:** Raspberry Pi Factor 201 or compatible
-- **RAM:** 4GB (minimum)
-- **Storage:** 128GB SSD (recommended)
-- **OS:** Ubuntu Server 24.04 LTS (ARM64)
-- **Network:** Ethernet connection with internet access
-- **Optional:** TPM 2.0 module (for secure provisioning)
-
-## 🔄 **Updating Scripts**
-
-### **Update Main Setup Script**
-```bash
-# Re-download the main script
-wget https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/setup-iot-edge-device.sh -O setup-iot-edge-device.sh
-chmod +x setup-iot-edge-device.sh
-```
-
-### **Update Helper Scripts**
-```bash
-sudo bash setup-iot-edge-device.sh
-# Choose option 7 (Helper Scripts)
-```
-
-### **Update Individual Helper Script**
-```bash
-# Example: Update iot-monitor.sh
-wget https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/iot-monitor.sh -O /usr/local/bin/iot-monitor.sh
-chmod +x /usr/local/bin/iot-monitor.sh
-```
-
-## 📄 **License**
-
-These scripts are part of the OpenPoint SCADA system.
-
----
-
-**Repository:** https://github.com/OpenPointHub/OpenPoint.Public  
-**Support:** Contact OpenPoint support team

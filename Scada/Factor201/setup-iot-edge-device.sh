@@ -6,7 +6,8 @@
 # Purpose: Prepare system for OpenPoint SCADA Polling IoT Edge Module
 ###############################################################################
 
-set -e  # Exit on error
+# Exit on error in main script, but allow functions to handle their own errors
+set -e
 
 # Colors
 RED='\033[0;31m'
@@ -15,6 +16,39 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+# Debug mode (set to 1 to show all command output)
+DEBUG_MODE=${DEBUG_MODE:-0}
+
+# Logging function
+log_command() {
+    if [ "$DEBUG_MODE" = "1" ]; then
+        "$@"
+    else
+        "$@" > /dev/null 2>&1
+    fi
+}
+
+# Error handler
+trap 'handle_error $? $LINENO' ERR
+
+handle_error() {
+    local exit_code=$1
+    local line_number=$2
+    echo ""
+    echo -e "${RED}═══════════════════════════════════════════${NC}"
+    echo -e "${RED}│  ERROR OCCURRED                          │${NC}"
+    echo -e "${RED}═══════════════════════════════════════════${NC}"
+    echo -e "${RED}Exit Code: $exit_code${NC}"
+    echo -e "${RED}Line Number: $line_number${NC}"
+    echo ""
+    echo "The script encountered an error. Check the output above for details."
+    echo ""
+    echo "TIP: Run with debug mode to see full command output:"
+    echo "     DEBUG_MODE=1 sudo bash ./setup-iot-edge-device.sh"
+    echo ""
+    read -p "Press ENTER to return to menu..."
+}
 
 # Function to show menu
 show_menu() {
@@ -46,6 +80,33 @@ check_root() {
     if [[ $EUID -ne 0 ]]; then
         echo -e "${RED}This script must be run as root (use sudo)${NC}" 
         exit 1
+    fi
+}
+
+# Check if package manager is busy
+check_package_manager() {
+    if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || 
+       fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || 
+       fuser /var/cache/apt/archives/lock >/dev/null 2>&1; then
+        echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
+        echo -e "${YELLOW}│  WARNING: Package Manager Busy          │${NC}"
+        echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
+        echo ""
+        echo "Another package manager (apt/dpkg) is currently running."
+        echo "This is often Ubuntu's automatic update process."
+        echo ""
+        echo "Options:"
+        echo "  1. Wait 5-10 minutes for it to finish, then run this script"
+        echo "  2. Check what's running: ps aux | grep apt"
+        echo "  3. Stop automatic updates:"
+        echo "     sudo systemctl stop apt-daily.timer"
+        echo "     sudo systemctl stop apt-daily-upgrade.timer"
+        echo ""
+        read -p "Continue anyway (not recommended)? (y/N): " REPLY
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
     fi
 }
 
@@ -173,17 +234,30 @@ system_updates() {
     
     # Update system
     echo -e "${GREEN}[1/3] Updating system packages...${NC}"
-    apt-get update --fix-missing > /dev/null 2>&1 || apt-get update --fix-missing
-    apt-get upgrade -y --fix-missing > /dev/null 2>&1
-    echo "  ✓ System packages updated"
+    echo "  (This may take several minutes...)"
+    
+    if ! apt-get update --fix-missing 2>&1 | grep -v "^Get:" | grep -v "^Hit:" | grep -v "^Ign:" | grep -E "Err:|W:|E:"; then
+        apt-get update --fix-missing
+    fi
+    
+    if ! apt-get upgrade -y --fix-missing 2>&1 | tail -20; then
+        echo -e "${RED}  ✗ Failed to upgrade packages${NC}"
+        echo "  Continuing anyway..."
+    else
+        echo "  ✓ System packages updated"
+    fi
     
     # Install essential packages
     echo ""
     echo -e "${GREEN}[2/3] Installing essential packages...${NC}"
-    apt-get install -y --fix-missing \
+    if apt-get install -y --fix-missing \
         curl wget git ca-certificates gnupg lsb-release \
-        smartmontools iotop htop net-tools iftop > /dev/null 2>&1
-    echo "  ✓ Essential packages installed"
+        smartmontools iotop htop net-tools iftop 2>&1 | tail -10; then
+        echo "  ✓ Essential packages installed"
+    else
+        echo -e "${YELLOW}  ⚠ Some packages may have failed to install${NC}"
+        echo "  Continuing anyway..."
+    fi
     
     # Remove unnecessary services
     echo ""
@@ -477,27 +551,93 @@ full_setup() {
     check_iotedge_installed || return 1
     cleanup_duplicates
     
+    # Disable exit on error for the setup steps
+    set +e
+    
     system_configuration
+    local step1_result=$?
+    if [ $step1_result -ne 0 ]; then
+        echo -e "${RED}✗ Step 1 failed with exit code $step1_result${NC}"
+        echo "Continue anyway? (y/N): "
+        read -p "" REPLY
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            set -e
+            return 1
+        fi
+    fi
     echo ""
     read -p "Press ENTER to continue..." dummy
     
     system_updates
+    local step2_result=$?
+    if [ $step2_result -ne 0 ]; then
+        echo -e "${RED}✗ Step 2 failed with exit code $step2_result${NC}"
+        echo "Continue anyway? (y/N): "
+        read -p "" REPLY
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            set -e
+            return 1
+        fi
+    fi
     echo ""
     read -p "Press ENTER to continue..." dummy
     
     system_optimization
+    local step3_result=$?
+    if [ $step3_result -ne 0 ]; then
+        echo -e "${RED}✗ Step 3 failed with exit code $step3_result${NC}"
+        echo "Continue anyway? (y/N): "
+        read -p "" REPLY
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            set -e
+            return 1
+        fi
+    fi
     echo ""
     read -p "Press ENTER to continue..." dummy
     
     container_engine
+    local step4_result=$?
+    if [ $step4_result -ne 0 ]; then
+        echo -e "${RED}✗ Step 4 failed with exit code $step4_result${NC}"
+        echo "Continue anyway? (y/N): "
+        read -p "" REPLY
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            set -e
+            return 1
+        fi
+    fi
     echo ""
     read -p "Press ENTER to continue..." dummy
     
     iotedge_runtime
+    local step5_result=$?
+    if [ $step5_result -ne 0 ]; then
+        echo -e "${RED}✗ Step 5 failed with exit code $step5_result${NC}"
+        echo "Continue anyway? (y/N): "
+        read -p "" REPLY
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            set -e
+            return 1
+        fi
+    fi
     echo ""
     read -p "Press ENTER to continue..." dummy
     
     helper_scripts
+    local step6_result=$?
+    if [ $step6_result -ne 0 ]; then
+        echo -e "${RED}✗ Step 6 failed with exit code $step6_result${NC}"
+        echo "Continue anyway? (y/N): "
+        read -p "" REPLY
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            set -e
+            return 1
+        fi
+    fi
+    
+    # Re-enable exit on error
+    set -e
     
     # Show completion summary
     echo ""
@@ -533,6 +673,7 @@ full_setup() {
 # Main script execution
 main() {
     check_root
+    check_package_manager
     
     while true; do
         show_menu
