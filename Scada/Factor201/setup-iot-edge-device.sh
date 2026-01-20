@@ -17,8 +17,8 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Debug mode (set to 1 to show all command output)
-DEBUG_MODE=${DEBUG_MODE:-0}
+# Debug mode (set to 1 to show all command output, 0 to hide)
+DEBUG_MODE=${DEBUG_MODE:-1}
 
 # Logging function
 log_command() {
@@ -44,8 +44,8 @@ handle_error() {
     echo ""
     echo "The script encountered an error. Check the output above for details."
     echo ""
-    echo "TIP: Run with debug mode to see full command output:"
-    echo "     DEBUG_MODE=1 sudo bash ./setup-iot-edge-device.sh"
+    echo "TIP: To hide verbose output, run with:"
+    echo "     DEBUG_MODE=0 sudo bash ./setup-iot-edge-device.sh"
     echo ""
     read -p "Press ENTER to return to menu..."
 }
@@ -480,6 +480,9 @@ container_engine() {
     echo -e "${BLUE}[STEP 4] Container Engine Installation${NC}"
     echo ""
     
+    # Temporarily disable exit-on-error for this function
+    set +e
+    
     # Install Moby
     echo -e "${GREEN}[1/2] Installing Moby container engine...${NC}"
     if command -v docker &> /dev/null; then
@@ -487,41 +490,57 @@ container_engine() {
         echo "  ✓ Container engine already installed (${DOCKER_VERSION})"
     else
         # Wait for package manager
-        wait_for_package_manager || return 1
+        wait_for_package_manager
+        if [ $? -ne 0 ]; then
+            set -e
+            return 1
+        fi
         
         echo "  Updating package lists..."
-        if apt-get update --fix-missing 2>&1 | tail -5; then
+        apt-get update --fix-missing 2>&1 | tail -5
+        local update_result=$?
+        if [ $update_result -eq 0 ]; then
             echo "  ✓ Package lists updated"
         else
             echo -e "${YELLOW}  ⚠ Update had warnings, continuing...${NC}"
         fi
         
         echo ""
-        echo "  Installing moby-engine..."
-        if apt-get install -y moby-engine 2>&1 | tee /tmp/docker-install.log | tail -15; then
+        echo "  Installing moby-engine (this may take a few minutes)..."
+        apt-get install -y moby-engine 2>&1 | tee /tmp/docker-install.log | tail -15
+        local install_result=$?
+        
+        if [ $install_result -eq 0 ]; then
             echo ""
             echo "  ✓ Moby engine package installed"
         else
             echo ""
-            echo -e "${RED}  ✗ Failed to install moby-engine${NC}"
+            echo -e "${RED}  ✗ Failed to install moby-engine (exit code: $install_result)${NC}"
             echo ""
-            echo "Last 20 lines of installation log:"
-            tail -20 /tmp/docker-install.log
+            echo "Last 30 lines of installation log:"
+            tail -30 /tmp/docker-install.log
             echo ""
-            echo "Diagnostic commands:"
-            echo "  Check if package exists: apt-cache policy moby-engine"
-            echo "  Check repositories: cat /etc/apt/sources.list"
-            echo "  Check for errors: cat /tmp/docker-install.log"
+            echo "Diagnostic commands to run:"
+            echo "  apt-cache policy moby-engine"
+            echo "  apt-cache search moby"
+            echo "  cat /tmp/docker-install.log"
+            set -e
             return 1
         fi
         
         echo ""
         echo "  Starting Docker service..."
-        if systemctl restart docker 2>&1; then
+        systemctl restart docker 2>&1
+        local docker_start_result=$?
+        
+        if [ $docker_start_result -eq 0 ]; then
             echo "  ✓ Docker service started"
         else
-            echo -e "${RED}  ✗ Failed to start Docker service${NC}"
+            echo -e "${RED}  ✗ Failed to start Docker service (exit code: $docker_start_result)${NC}"
+            echo ""
+            echo "Service status:"
             systemctl status docker.service --no-pager -l
+            set -e
             return 1
         fi
     fi
@@ -536,11 +555,13 @@ container_engine() {
         sleep 2
     fi
     
-    if systemctl is-active --quiet docker; then
+    if systemctl is_active --quiet docker; then
         echo "  ✓ Docker service is active"
     else
         echo -e "${RED}  ✗ Docker service failed to start${NC}"
+        echo ""
         systemctl status docker --no-pager
+        set -e
         return 1
     fi
     
@@ -550,6 +571,7 @@ container_engine() {
     else
         echo -e "${RED}  ✗ Docker command failed${NC}"
         echo "  Try running: docker --version"
+        set -e
         return 1
     fi
     
@@ -608,6 +630,9 @@ EOF
         systemctl restart docker
         echo "  ✓ Docker configured"
     fi
+    
+    # Re-enable exit-on-error
+    set -e
     
     echo ""
     echo -e "${GREEN}✓ Container engine ready${NC}"

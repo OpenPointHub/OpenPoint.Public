@@ -43,8 +43,11 @@ sudo bash ./setup-iot-edge-device.sh
 - Downloads helper utilities to `/usr/local/bin/`
 - Works offline after helper scripts are downloaded
 - **Automatically handles Ubuntu's automatic updates**
+- **Debug mode enabled by default** - see all command output for transparency
 
 **⚠️ Common Issue:** If script returns to menu during "Updating system packages...", it's likely Ubuntu's automatic updates running in background. The script will offer to disable them automatically. See [Quick Troubleshooting Guide](QUICK_TROUBLESHOOTING.md) for details.
+
+**💡 Tip:** To reduce verbosity, run with `DEBUG_MODE=0 sudo bash ./setup-iot-edge-device.sh`
 
 ## 📋 **Interactive Menu**
 

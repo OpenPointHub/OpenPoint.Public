@@ -20,7 +20,8 @@ sudo systemctl stop unattended-upgrades && sudo systemctl disable unattended-upg
 
 | Symptom | Quick Fix |
 |---------|-----------|
-| **Silent failure, no error** | Run with debug: `DEBUG_MODE=1 sudo bash ./setup-iot-edge-device.sh` |
+| **Too much output** | Run with quiet mode: `DEBUG_MODE=0 sudo bash ./setup-iot-edge-device.sh` |
+| **Silent failure, no error** | Debug mode is on by default now! Check output above the error |
 | **"dpkg lock" error** | Script now waits automatically (up to 5 min) |
 | **Package install fails** | Check internet: `ping -c 3 8.8.8.8` |
 | **Step X failed, continue?** | Say `y` to continue to next step |
