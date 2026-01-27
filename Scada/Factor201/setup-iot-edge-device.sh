@@ -69,9 +69,10 @@ show_menu() {
     echo -e "  ${GREEN}6${NC}) IoT Edge Runtime - Install Azure IoT Edge and TPM tools"
     echo -e "  ${GREEN}7${NC}) Extract TPM Key - Get TPM endorsement key for DPS enrollment"
     echo -e "  ${GREEN}8${NC}) Persistent Storage - Configure edgeAgent/edgeHub persistent storage"
+    echo -e "  ${GREEN}9${NC}) Configure DNS - Set custom DNS servers or use automatic resolution"
     echo ""
-    echo -e "  ${GREEN}9${NC}) Clean Duplicate Config - Remove duplicate entries from previous runs"
-    echo -e "  ${GREEN}10${NC}) Configure Update Policy - Security-only, manual, or disable updates"
+    echo -e "  ${GREEN}10${NC}) Clean Duplicate Config - Remove duplicate entries from previous runs"
+    echo -e "  ${GREEN}11${NC}) Configure Update Policy - Security-only, manual, or disable updates"
     echo ""
     echo -e "  ${YELLOW}0${NC}) Exit"
     echo ""
@@ -926,6 +927,300 @@ EOF
     return 0
 }
 
+# Configure DNS resolution
+configure_dns() {
+    echo -e "${BLUE}[DNS CONFIGURATION]${NC}"
+    echo ""
+    
+    # Temporarily disable exit-on-error for this function
+    set +e
+    
+    # Show current DNS configuration
+    echo -e "${GREEN}[1/4] Checking current DNS configuration...${NC}"
+    echo ""
+    
+    # Check if systemd-resolved is active
+    if systemctl is-active systemd-resolved &>/dev/null; then
+        echo "  Current DNS (from systemd-resolved):"
+        resolvectl status 2>/dev/null | grep "DNS Servers:" | head -5 | sed 's/^/    /'
+    else
+        echo "  Current DNS (from /etc/resolv.conf):"
+        grep "^nameserver" /etc/resolv.conf 2>/dev/null | sed 's/^/    /' || echo "    (none configured)"
+    fi
+    
+    # Test current DNS
+    echo ""
+    echo "  Testing current DNS resolution..."
+    if timeout 3 nslookup google.com &>/dev/null; then
+        echo -e "  ${GREEN}✓ DNS is working${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ DNS resolution failed${NC}"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}[2/4] Choose DNS configuration:${NC}"
+    echo ""
+    echo -e "  ${GREEN}1${NC}) ${CYAN}Use DHCP/Automatic DNS${NC} (default)"
+    echo "     • Let DHCP server provide DNS settings"
+    echo "     • Recommended for most environments"
+    echo "     • No manual configuration needed"
+    echo ""
+    echo -e "  ${GREEN}2${NC}) ${CYAN}Configure Custom DNS Servers${NC}"
+    echo "     • Manually specify DNS server IP addresses"
+    echo "     • Use for corporate/private DNS"
+    echo "     • Examples: 8.8.8.8, 1.1.1.1, or your local DNS"
+    echo ""
+    echo -e "  ${GREEN}3${NC}) Show current configuration and exit"
+    echo ""
+    read -p "Select option (1-3): " dns_choice
+    echo ""
+    
+    case $dns_choice in
+        1)
+            echo -e "${GREEN}[3/4] Configuring automatic DNS (DHCP)...${NC}"
+            echo ""
+            
+            # Find the primary network interface
+            PRIMARY_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+            
+            if [ -z "$PRIMARY_INTERFACE" ]; then
+                echo -e "${RED}✗ Could not detect primary network interface${NC}"
+                set -e
+                return 1
+            fi
+            
+            echo "  Detected interface: $PRIMARY_INTERFACE"
+            
+            # Backup existing netplan configuration
+            if [ -f /etc/netplan/01-netcfg.yaml ]; then
+                cp /etc/netplan/01-netcfg.yaml /etc/netplan/01-netcfg.yaml.backup-$(date +%s)
+                echo "  ✓ Backed up existing netplan configuration"
+            fi
+            
+            # Create netplan configuration with DHCP
+            cat > /etc/netplan/01-netcfg.yaml <<EOF
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    $PRIMARY_INTERFACE:
+      dhcp4: true
+      dhcp6: false
+      optional: true
+EOF
+            
+            echo "  ✓ Created netplan configuration for automatic DNS"
+            echo ""
+            echo -e "${GREEN}[4/4] Applying configuration...${NC}"
+            
+            # Apply netplan configuration
+            netplan apply 2>&1 | tail -5
+            
+            if [ $? -eq 0 ]; then
+                echo "  ✓ Configuration applied successfully"
+                
+                # Wait for DNS to update
+                echo ""
+                echo "  Waiting for DNS to update (5 seconds)..."
+                sleep 5
+                
+                # Test DNS
+                echo ""
+                echo "  Testing DNS resolution..."
+                if timeout 3 nslookup google.com &>/dev/null; then
+                    echo -e "  ${GREEN}✓ DNS is working!${NC}"
+                else
+                    echo -e "  ${YELLOW}⚠ DNS test failed${NC}"
+                    echo "  This may be temporary - try 'sudo resolvectl flush-caches'"
+                fi
+                
+                echo ""
+                echo -e "${GREEN}✓ Automatic DNS configured${NC}"
+            else
+                echo -e "${RED}✗ Failed to apply netplan configuration${NC}"
+                echo "  Restoring backup..."
+                if [ -f /etc/netplan/01-netcfg.yaml.backup-* ]; then
+                    mv /etc/netplan/01-netcfg.yaml.backup-* /etc/netplan/01-netcfg.yaml
+                fi
+                set -e
+                return 1
+            fi
+            ;;
+            
+        2)
+            echo -e "${GREEN}[3/4] Configuring custom DNS servers...${NC}"
+            echo ""
+            
+            # Prompt for DNS servers
+            echo "Enter DNS server IP addresses (one per line, blank line to finish):"
+            echo "Examples: 8.8.8.8, 1.1.1.1, 192.168.1.1"
+            echo ""
+            
+            DNS_SERVERS=()
+            while true; do
+                read -p "DNS Server ${#DNS_SERVERS[@]}: " dns_ip
+                
+                # Break on empty input
+                if [ -z "$dns_ip" ]; then
+                    break
+                fi
+                
+                # Validate IP address format
+                if echo "$dns_ip" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+                    DNS_SERVERS+=("$dns_ip")
+                    echo "  ✓ Added: $dns_ip"
+                else
+                    echo -e "  ${YELLOW}⚠ Invalid IP format, skipping${NC}"
+                fi
+                
+                # Stop after 3 servers
+                if [ ${#DNS_SERVERS[@]} -ge 3 ]; then
+                    echo "  Maximum 3 DNS servers, continuing..."
+                    break
+                fi
+            done
+            
+            # Check if any DNS servers were added
+            if [ ${#DNS_SERVERS[@]} -eq 0 ]; then
+                echo -e "${RED}✗ No valid DNS servers provided${NC}"
+                set -e
+                return 1
+            fi
+            
+            echo ""
+            echo "Configured DNS servers:"
+            for dns in "${DNS_SERVERS[@]}"; do
+                echo "  • $dns"
+            done
+            echo ""
+            
+            # Find the primary network interface
+            PRIMARY_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+            
+            if [ -z "$PRIMARY_INTERFACE" ]; then
+                echo -e "${RED}✗ Could not detect primary network interface${NC}"
+                set -e
+                return 1
+            fi
+            
+            echo "  Detected interface: $PRIMARY_INTERFACE"
+            
+            # Backup existing netplan configuration
+            if [ -f /etc/netplan/01-netcfg.yaml ]; then
+                cp /etc/netplan/01-netcfg.yaml /etc/netplan/01-netcfg.yaml.backup-$(date +%s)
+                echo "  ✓ Backed up existing netplan configuration"
+            fi
+            
+            # Build nameservers YAML array
+            NAMESERVERS_YAML=""
+            for dns in "${DNS_SERVERS[@]}"; do
+                NAMESERVERS_YAML+="        - $dns"$'\n'
+            done
+            
+            # Create netplan configuration with custom DNS
+            cat > /etc/netplan/01-netcfg.yaml <<EOF
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    $PRIMARY_INTERFACE:
+      dhcp4: true
+      dhcp6: false
+      dhcp4-overrides:
+        use-dns: false
+      nameservers:
+        addresses:
+$NAMESERVERS_YAML
+      optional: true
+EOF
+            
+            echo "  ✓ Created netplan configuration with custom DNS"
+            echo ""
+            echo -e "${GREEN}[4/4] Applying configuration...${NC}"
+            
+            # Apply netplan configuration
+            netplan apply 2>&1 | tail -5
+            
+            if [ $? -eq 0 ]; then
+                echo "  ✓ Configuration applied successfully"
+                
+                # Wait for DNS to update
+                echo ""
+                echo "  Waiting for DNS to update (5 seconds)..."
+                sleep 5
+                
+                # Flush DNS cache
+                resolvectl flush-caches 2>/dev/null || true
+                
+                # Test DNS
+                echo ""
+                echo "  Testing DNS resolution..."
+                if timeout 3 nslookup google.com &>/dev/null; then
+                    echo -e "  ${GREEN}✓ DNS is working!${NC}"
+                    
+                    # Show which DNS server answered
+                    DNS_SERVER_USED=$(nslookup google.com 2>/dev/null | grep "Server:" | awk '{print $2}')
+                    if [ -n "$DNS_SERVER_USED" ]; then
+                        echo "  Using DNS server: $DNS_SERVER_USED"
+                    fi
+                else
+                    echo -e "  ${YELLOW}⚠ DNS test failed${NC}"
+                    echo "  Possible issues:"
+                    echo "    • DNS server IP incorrect"
+                    echo "    • DNS server not reachable"
+                    echo "    • Firewall blocking DNS (port 53)"
+                fi
+                
+                echo ""
+                echo -e "${GREEN}✓ Custom DNS configured${NC}"
+            else
+                echo -e "${RED}✗ Failed to apply netplan configuration${NC}"
+                echo "  Restoring backup..."
+                if [ -f /etc/netplan/01-netcfg.yaml.backup-* ]; then
+                    mv /etc/netplan/01-netcfg.yaml.backup-* /etc/netplan/01-netcfg.yaml
+                fi
+                set -e
+                return 1
+            fi
+            ;;
+            
+        3)
+            echo -e "${CYAN}Current DNS Configuration:${NC}"
+            echo ""
+            
+            # Show netplan config
+            if [ -f /etc/netplan/01-netcfg.yaml ]; then
+                echo "Netplan configuration (/etc/netplan/01-netcfg.yaml):"
+                cat /etc/netplan/01-netcfg.yaml | sed 's/^/  /'
+                echo ""
+            fi
+            
+            # Show systemd-resolved status
+            if systemctl is-active systemd-resolved &>/dev/null; then
+                echo "Active DNS servers (systemd-resolved):"
+                resolvectl status 2>/dev/null | grep -A 10 "DNS Servers:" | sed 's/^/  /'
+            else
+                echo "DNS from /etc/resolv.conf:"
+                cat /etc/resolv.conf | sed 's/^/  /'
+            fi
+            
+            echo ""
+            ;;
+            
+        *)
+            echo -e "${RED}Invalid option${NC}"
+            set -e
+            return 1
+            ;;
+    esac
+    
+    # Re-enable exit-on-error
+    set -e
+    
+    echo ""
+    return 0
+}
+
 # Configure update policy
 configure_update_policy() {
     echo -e "${BLUE}[UPDATE POLICY CONFIGURATION]${NC}"
@@ -1343,14 +1638,19 @@ main() {
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             9)
+                configure_dns
+                read -p "Press ENTER to return to menu..." dummy
+                ;;
+            10)
                 cleanup_duplicates
                 echo -e "${GREEN}✓ Cleanup complete${NC}"
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
-            10)
+            11)
                 configure_update_policy
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
+
             0)
                 echo "Exiting..."
                 exit 0
