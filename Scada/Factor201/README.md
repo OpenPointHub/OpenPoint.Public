@@ -7,26 +7,14 @@ This directory contains scripts for setting up and managing Raspberry Pi Factor 
 ```
 OpenPoint.Public/Scada/Factor201/
 ├── README.md                    # This documentation
-├── setup-iot-edge-device.sh    # Main setup script (all-in-one)
-├── get-tpm-key.sh              # TPM key extractor
-├── iot-monitor.sh              # System monitor
-└── scada-logs.sh               # Log viewer
-
-When deployed on device:
-/usr/local/bin/                  # Helper scripts (in $PATH)
-├── get-tpm-key.sh              # (only if TPM detected)
-├── iot-monitor.sh
-└── scada-logs.sh
+└── setup-iot-edge-device.sh    # Main setup script (all-in-one)
 ```
 
 ## 📄 **Scripts**
 
 | Script | Purpose | Public URL |
 |--------|---------|------------|
-| `setup-iot-edge-device.sh` | Main setup script (all-in-one, downloads helper scripts) | [Download](https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/setup-iot-edge-device.sh) |
-| `get-tpm-key.sh` | Extracts TPM endorsement key for DPS enrollment | [Download](https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/get-tpm-key.sh) |
-| `iot-monitor.sh` | System health monitoring utility | [Download](https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/iot-monitor.sh) |
-| `scada-logs.sh` | Interactive log viewer for SCADA module | [Download](https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/scada-logs.sh) |
+| `setup-iot-edge-device.sh` | Main setup script with integrated TPM key extraction | [Download](https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/setup-iot-edge-device.sh) |
 
 ## 🚀 **Quick Start**
 
@@ -39,12 +27,12 @@ sudo bash ./setup-iot-edge-device.sh
 
 **Features:**
 - Interactive menu system
-- All setup functions embedded in one script
-- Downloads helper utilities to `/usr/local/bin/`
+- All functions embedded in one self-contained script
 - **Automatically handles Ubuntu's automatic updates**
 - **Configurable update policy** for production deployments
 - **Debug mode enabled by default** - see all command output for transparency
 - **Intelligent error handling** - waits for package manager, offers solutions
+- **Integrated TPM key extraction** - no external dependencies
 
 **⚠️ Common Issue:** If script returns to menu during "Updating system packages...", it's likely Ubuntu's automatic updates running in background. The script will automatically detect this, wait up to 5 minutes, and offer to disable automatic updates. See [Quick Troubleshooting Guide](QUICK_TROUBLESHOOTING.md) for details.
 
@@ -55,8 +43,7 @@ sudo bash ./setup-iot-edge-device.sh
 The setup script provides an interactive menu with the following options:
 
 1. **Full Setup** - Complete installation (recommended for first-time setup)
-   - Runs all steps sequentially
-   - Downloads helper scripts
+   - Runs all steps sequentially (steps 2-6)
    - Takes 15-20 minutes
    - Prompts to continue on errors (optional skip)
 
@@ -95,20 +82,26 @@ The setup script provides an interactive menu with the following options:
    - **Verifies installation** and shows version
    - **Note:** Microsoft Defender for IoT micro agent (retired August 2025) is no longer installed
 
-7. **Helper Scripts** - Download monitoring and log viewer utilities
-   - Downloads `get-tpm-key.sh` (if TPM present)
-   - Downloads `iot-monitor.sh` (system monitoring)
-   - Downloads `scada-logs.sh` (log viewer)
-   - Installs to `/usr/local/bin/` (in PATH)
-   - **Verifies downloads** before marking complete
+7. **Extract TPM Key** - Get TPM endorsement key for DPS enrollment
+   - Initializes TPM on first run
+   - Extracts Registration ID (SHA256 hash)
+   - Extracts Endorsement Key (base64 encoded)
+   - Displays formatted output for Azure administrator
+   - **Integrated** - no external scripts needed
 
-8. **Clean Duplicate Config** - Maintenance utility
+8. **Persistent Storage** - Configure edgeAgent/edgeHub persistent storage
+   - Creates host directories: `/var/lib/iotedge/edgeAgent` and `/var/lib/iotedge/edgeHub`
+   - Sets proper permissions for iotedge user
+   - Provides deployment manifest configuration examples
+   - Persists `/tmp/edgeAgent` and `/tmp/edgeHub` across container restarts
+
+9. **Clean Duplicate Config** - Maintenance utility
    - Removes duplicate entries from `/etc/sysctl.conf`
    - Removes duplicate entries from `/etc/security/limits.conf`
    - Safe to run multiple times
    - Useful after running setup script multiple times
 
-9. **Configure Update Policy** ⭐ NEW
+10. **Configure Update Policy** ⭐ Recommended for Production
    - **Security-only automatic** (recommended for production)
      - Auto-installs critical security patches at 3 AM daily
      - Feature updates require manual approval
@@ -138,18 +131,27 @@ sudo bash ./setup-iot-edge-device.sh
 sudo reboot
 ```
 
+### **After Reboot - Extract TPM Key**
+```bash
+sudo bash ./setup-iot-edge-device.sh
+# Choose option 7 (Extract TPM Key)
+# Copy Registration ID and Endorsement Key
+# Send to Azure administrator
+```
+
+### **Configure Persistent Storage (Optional)**
+```bash
+sudo bash ./setup-iot-edge-device.sh
+# Choose option 8 (Persistent Storage)
+# Then update deployment manifest with provided configuration
+```
+
 ### **Configure Update Policy (Production)**
 ```bash
 sudo bash ./setup-iot-edge-device.sh
-# Choose option 9 (Configure Update Policy)
+# Choose option 10 (Configure Update Policy)
 # Choose option 1 (Security-only automatic)
 # Recommended for remote substations
-```
-
-### **Update Helper Scripts**
-```bash
-sudo bash ./setup-iot-edge-device.sh
-# Choose option 7 (Helper Scripts)
 ```
 
 ### **Re-run System Optimization**
@@ -161,29 +163,36 @@ sudo bash ./setup-iot-edge-device.sh
 ### **Fix Duplicate Config Entries**
 ```bash
 sudo bash ./setup-iot-edge-device.sh
-# Choose option 8 (Clean Duplicates)
+# Choose option 9 (Clean Duplicates)
 ```
 
 ### **Check for System Updates**
 ```bash
 sudo bash ./setup-iot-edge-device.sh
-# Choose option 9 (Configure Update Policy)
+# Choose option 10 (Configure Update Policy)
 # Choose option 4 (Show current policy)
 ```
 
 ## 📖 **After Setup**
 
-Once setup is complete, use these commands:
+Once setup is complete:
 
 ```bash
-# Reboot to apply all changes
+# 1. Reboot to apply all changes
 sudo reboot
 
-# Extract TPM key (send to Azure administrator)
-get-tpm-key.sh
+# 2. Extract TPM key (send to Azure administrator)
+sudo bash ./setup-iot-edge-device.sh
+# Select option 7
 
-# Monitor system health
-iot-monitor.sh
+# 3. View container logs
+docker logs -f <container_name>
+docker logs -f ScadaPollingModule
 
-# View SCADA module logs
-scada-logs.sh
+# 4. Monitor system resources
+docker stats
+
+# 5. Check IoT Edge status
+sudo iotedge check
+sudo iotedge system status
+```

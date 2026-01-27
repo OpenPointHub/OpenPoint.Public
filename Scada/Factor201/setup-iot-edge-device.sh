@@ -67,10 +67,11 @@ show_menu() {
     echo -e "  ${GREEN}4${NC}) System Optimization - Swap, TRIM, watchdog, file descriptors, network"
     echo -e "  ${GREEN}5${NC}) Container Engine - Install and configure Moby/Docker"
     echo -e "  ${GREEN}6${NC}) IoT Edge Runtime - Install Azure IoT Edge and TPM tools"
-    echo -e "  ${GREEN}7${NC}) Helper Scripts - Download monitoring and log viewer scripts"
+    echo -e "  ${GREEN}7${NC}) Extract TPM Key - Get TPM endorsement key for DPS enrollment"
+    echo -e "  ${GREEN}8${NC}) Persistent Storage - Configure edgeAgent/edgeHub persistent storage"
     echo ""
-    echo -e "  ${GREEN}8${NC}) Clean Duplicate Config - Remove duplicate entries from previous runs"
-    echo -e "  ${GREEN}9${NC}) Configure Update Policy - Security-only, manual, or disable updates"
+    echo -e "  ${GREEN}9${NC}) Clean Duplicate Config - Remove duplicate entries from previous runs"
+    echo -e "  ${GREEN}10${NC}) Configure Update Policy - Security-only, manual, or disable updates"
     echo ""
     echo -e "  ${YELLOW}0${NC}) Exit"
     echo ""
@@ -772,70 +773,156 @@ iotedge_runtime() {
     return 0
 }
 
-# Download helper scripts
-helper_scripts() {
-    echo -e "${BLUE}[STEP 6] Downloading Helper Scripts${NC}"
+# Extract TPM endorsement key
+extract_tpm_key() {
+    echo -e "${BLUE}[TPM KEY EXTRACTION]${NC}"
+    echo ""
+    
+    # Check if TPM is available
+    if [ ! -e /dev/tpm0 ] && [ ! -e /dev/tpmrm0 ]; then
+        echo -e "${RED}✗ No TPM device found!${NC}"
+        echo "  Please ensure TPM is enabled in BIOS/UEFI"
+        echo ""
+        return 1
+    fi
+    
+    echo -e "${GREEN}Checking TPM status...${NC}"
+    echo ""
+    
+    # Try to read existing endorsement key
+    tpm2_readpublic -Q -c 0x81010001 -o ek.pub 2> /dev/null
+    
+    if [ $? -gt 0 ]; then
+        # EK doesn't exist, need to create it
+        echo "Initializing TPM (first-time setup)..."
+        echo ""
+        
+        # Create the endorsement key (EK)
+        echo "  → Creating endorsement key..."
+        tpm2_createek -c 0x81010001 -G rsa -u ek.pub
+        
+        if [ $? -gt 0 ]; then
+            echo -e "${RED}✗ Failed to create endorsement key${NC}"
+            rm -f ek.pub 2> /dev/null
+            return 1
+        fi
+        
+        # Create the storage root key (SRK)
+        echo "  → Creating storage root key..."
+        tpm2_createprimary -Q -C o -c srk.ctx > /dev/null
+        
+        # Make the SRK persistent
+        echo "  → Making SRK persistent..."
+        tpm2_evictcontrol -c srk.ctx 0x81000001 > /dev/null
+        
+        # Open transient handle space for the TPM
+        tpm2_flushcontext -t > /dev/null
+        
+        echo -e "  ${GREEN}✓ TPM initialized successfully!${NC}"
+        echo ""
+    else
+        echo -e "  ${GREEN}✓ TPM already initialized${NC}"
+        echo ""
+    fi
+    
+    # Extract registration information
+    echo "Gathering registration information..."
+    echo ""
+    
+    # Calculate Registration ID (SHA256 of endorsement key)
+    REGISTRATION_ID=$(sha256sum -b ek.pub | cut -d' ' -f1 | sed -e 's/[^[:alnum:]]//g')
+    
+    # Get Endorsement Key (base64 encoded)
+    ENDORSEMENT_KEY=$(base64 -w0 ek.pub)
+    
+    # Display results
+    echo -e "${BLUE}════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}│         DEVICE REGISTRATION INFO           │${NC}"
+    echo -e "${BLUE}════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${CYAN}Registration ID:${NC}"
+    echo "$REGISTRATION_ID"
+    echo ""
+    echo -e "${CYAN}Endorsement Key:${NC}"
+    echo "$ENDORSEMENT_KEY"
+    echo ""
+    echo -e "${BLUE}════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${CYAN}📧 Next Steps:${NC}"
+    echo "   1. Copy both values above"
+    echo "   2. Send to your Azure administrator"
+    echo "   3. They will create a DPS enrollment using:"
+    echo "      - Registration ID (shown above)"
+    echo "      - Endorsement Key (shown above)"
+    echo ""
+    
+    # Clean up temporary files
+    rm -f ek.pub srk.ctx 2> /dev/null
+    
+    echo -e "${GREEN}✓ Complete!${NC}"
+    echo ""
+    
+    return 0
+}
+
+# Persist IoT Edge storage to host filesystem
+persist_iot_edge_storage() {
+    echo -e "${BLUE}[STEP 7] Configuring Persistent IoT Edge Storage${NC}"
     echo ""
     
     # Temporarily disable exit-on-error for this function
     set +e
     
-    BASE_URL="https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201"
+    echo -e "${GREEN}[1/3] Creating persistent storage directories...${NC}"
     
-    # TPM key extractor (if TPM present)
-    if ls /dev/tpm* &> /dev/null 2>&1; then
-        echo -e "${GREEN}[1/3] Downloading TPM key extraction helper...${NC}"
-        wget -q ${BASE_URL}/get-tpm-key.sh -O /usr/local/bin/get-tpm-key.sh
-        local wget_result=$?
-        
-        if [ $wget_result -eq 0 ]; then
-            chmod +x /usr/local/bin/get-tpm-key.sh
-            echo "  ✓ Created: get-tpm-key.sh"
-        else
-            echo -e "${RED}  ✗ Failed to download get-tpm-key.sh (exit code: $wget_result)${NC}"
-            echo "  Check internet connection or URL: ${BASE_URL}/get-tpm-key.sh"
-        fi
-    else
-        echo -e "${YELLOW}[1/3] Skipping TPM helper (no TPM device)${NC}"
-    fi
+    # Create directories on host for persistent storage
+    mkdir -p /var/lib/iotedge/edgeAgent
+    mkdir -p /var/lib/iotedge/edgeHub
     
-    # System monitor
+    # Set proper permissions
+    chown -R iotedge:iotedge /var/lib/iotedge 2>/dev/null || true
+    chmod -R 755 /var/lib/iotedge
+    
+    echo "  ✓ Created: /var/lib/iotedge/edgeAgent"
+    echo "  ✓ Created: /var/lib/iotedge/edgeHub"
+    
+    # Create environment file for IoT Edge modules
     echo ""
-    echo -e "${GREEN}[2/3] Downloading system monitoring script...${NC}"
-    wget -q ${BASE_URL}/iot-monitor.sh -O /usr/local/bin/iot-monitor.sh
-    local wget_result=$?
+    echo -e "${GREEN}[2/3] Configuring IoT Edge environment variables...${NC}"
     
-    if [ $wget_result -eq 0 ]; then
-        chmod +x /usr/local/bin/iot-monitor.sh
-        echo "  ✓ Created: iot-monitor.sh"
-    else
-        echo -e "${RED}  ✗ Failed to download iot-monitor.sh (exit code: $wget_result)${NC}"
-        echo "  Check internet connection or URL: ${BASE_URL}/iot-monitor.sh"
-        set -e
-        return 1
-    fi
+    # This will be used by the deployment manifest to configure volume mounts
+    cat > /etc/systemd/system/iotedge.service.d/persistent-storage.conf <<'EOF'
+[Service]
+Environment="EDGEAGENT_STORAGE_PATH=/var/lib/iotedge/edgeAgent"
+Environment="EDGEHUB_STORAGE_PATH=/var/lib/iotedge/edgeHub"
+EOF
     
-    # Log viewer
+    echo "  ✓ Created systemd drop-in configuration"
+    
+    # Reload systemd to pick up changes
     echo ""
-    echo -e "${GREEN}[3/3] Downloading SCADA log viewer...${NC}"
-    wget -q ${BASE_URL}/scada-logs.sh -O /usr/local/bin/scada-logs.sh
-    local wget_result=$?
-    
-    if [ $wget_result -eq 0 ]; then
-        chmod +x /usr/local/bin/scada-logs.sh
-        echo "  ✓ Created: scada-logs.sh"
-    else
-        echo -e "${RED}  ✗ Failed to download scada-logs.sh (exit code: $wget_result)${NC}"
-        echo "  Check internet connection or URL: ${BASE_URL}/scada-logs.sh"
-        set -e
-        return 1
-    fi
+    echo -e "${GREEN}[3/3] Reloading systemd configuration...${NC}"
+    systemctl daemon-reload
+    echo "  ✓ Systemd configuration reloaded"
     
     # Re-enable exit-on-error
     set -e
     
     echo ""
-    echo -e "${GREEN}✓ Helper scripts ready${NC}"
+    echo -e "${GREEN}✓ Persistent storage configured${NC}"
+    echo ""
+    echo -e "${CYAN}ℹ️  To use persistent storage in your deployment manifest:${NC}"
+    echo ""
+    echo "For edgeAgent, add to createOptions:"
+    echo '  "HostConfig": {'
+    echo '    "Binds": ["/var/lib/iotedge/edgeAgent:/tmp/edgeAgent"]'
+    echo '  }'
+    echo ""
+    echo "For edgeHub, add to createOptions:"
+    echo '  "HostConfig": {'
+    echo '    "Binds": ["/var/lib/iotedge/edgeHub:/tmp/edgeHub"]'
+    echo '  }'
+    echo ""
     return 0
 }
 
@@ -1173,20 +1260,6 @@ full_setup() {
             return 1
         fi
     fi
-    echo ""
-    read -p "Press ENTER to continue..." dummy
-    
-    helper_scripts
-    local step6_result=$?
-    if [ $step6_result -ne 0 ]; then
-        echo -e "${RED}✗ Step 6 failed with exit code $step6_result${NC}"
-        echo "Continue anyway? (y/N): "
-        read -p "" REPLY
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            set -e
-            return 1
-        fi
-    fi
     
     # Re-enable exit on error
     set -e
@@ -1210,15 +1283,17 @@ full_setup() {
     echo "   ✓ File descriptor limits increased"
     echo "   ✓ Moby container engine configured"
     echo "   ✓ Azure IoT Edge runtime installed"
-    echo "   ✓ Helper scripts installed"
     echo ""
     echo -e "${YELLOW}⚠️  Please reboot the system:${NC}"
     echo "   sudo reboot"
     echo ""
-    echo "After reboot, run:"
-    echo "   get-tpm-key.sh      - Extract TPM key"
-    echo "   iot-monitor.sh      - Monitor system health"
-    echo "   scada-logs.sh       - View SCADA logs"
+    echo "After reboot, run this script again and select:"
+    echo "   7. Extract TPM Key - Get registration ID and endorsement key"
+    echo "   8. Persistent Storage - Configure persistent storage (if needed)"
+    echo ""
+    echo "To view container logs:"
+    echo "   docker logs -f <container_name>"
+    echo "   docker logs -f ScadaPollingModule"
     echo ""
 }
 
@@ -1260,15 +1335,19 @@ main() {
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             7)
-                helper_scripts
+                extract_tpm_key
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             8)
+                persist_iot_edge_storage
+                read -p "Press ENTER to return to menu..." dummy
+                ;;
+            9)
                 cleanup_duplicates
                 echo -e "${GREEN}✓ Cleanup complete${NC}"
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
-            9)
+            10)
                 configure_update_policy
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
