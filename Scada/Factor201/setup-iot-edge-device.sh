@@ -589,12 +589,54 @@ container_engine() {
     echo -e "${GREEN}[2/2] Configuring container engine...${NC}"
     mkdir -p /etc/docker
     
+    # Detect DNS servers from current configuration
+    echo "  Detecting DNS configuration..."
+    DNS_SERVERS=()
+    
+    # Try to get DNS from systemd-resolved
+    if systemctl is-active systemd-resolved &>/dev/null; then
+        DETECTED_DNS=$(resolvectl status 2>/dev/null | grep "DNS Servers:" -A 3 | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -3)
+        if [ -n "$DETECTED_DNS" ]; then
+            while IFS= read -r dns_ip; do
+                # Skip loopback addresses
+                if [[ "$dns_ip" != "127."* ]]; then
+                    DNS_SERVERS+=("\"$dns_ip\"")
+                fi
+            done <<< "$DETECTED_DNS"
+        fi
+    fi
+    
+    # Fallback to resolv.conf if no DNS found yet
+    if [ ${#DNS_SERVERS[@]} -eq 0 ]; then
+        DETECTED_DNS=$(grep "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | head -3)
+        if [ -n "$DETECTED_DNS" ]; then
+            while IFS= read -r dns_ip; do
+                # Skip loopback addresses
+                if [[ "$dns_ip" != "127."* ]]; then
+                    DNS_SERVERS+=("\"$dns_ip\"")
+                fi
+            done <<< "$DETECTED_DNS"
+        fi
+    fi
+    
+    # Final fallback to Google DNS
+    if [ ${#DNS_SERVERS[@]} -eq 0 ]; then
+        DNS_SERVERS=("\"8.8.8.8\"" "\"8.8.4.4\"")
+        echo -e "  ${YELLOW}⚠ No DNS servers detected, using Google DNS (8.8.8.8, 8.8.4.4)${NC}"
+    else
+        echo "  ✓ Detected DNS servers: ${DNS_SERVERS[@]//\"/}"
+    fi
+    
+    # Build DNS JSON array
+    DNS_JSON=$(IFS=,; echo "${DNS_SERVERS[*]}")
+    
     if [ -f /etc/docker/daemon.json ]; then
         if ! grep -q '"log-driver": "local"' /etc/docker/daemon.json; then
             echo "  Backing up existing daemon.json..."
             cp /etc/docker/daemon.json /etc/docker/daemon.json.backup.$(date +%Y%m%d_%H%M%S)
             cat > /etc/docker/daemon.json <<EOF
 {
+  "dns": [$DNS_JSON],
   "log-driver": "local",
   "log-opts": {
     "max-size": "10m",
@@ -612,7 +654,7 @@ container_engine() {
 EOF
             echo "  Restarting Docker to apply configuration..."
             systemctl restart docker
-            echo "  ✓ Docker reconfigured for IoT Edge"
+            echo "  ✓ Docker reconfigured for IoT Edge with DNS"
         else
             echo "  ✓ Docker already configured for IoT Edge"
         fi
@@ -620,6 +662,7 @@ EOF
         echo "  Creating daemon.json configuration..."
         cat > /etc/docker/daemon.json <<EOF
 {
+  "dns": [$DNS_JSON],
   "log-driver": "local",
   "log-opts": {
     "max-size": "10m",
@@ -637,7 +680,7 @@ EOF
 EOF
         echo "  Restarting Docker to apply configuration..."
         systemctl restart docker
-        echo "  ✓ Docker configured"
+        echo "  ✓ Docker configured with DNS"
     fi
     
     # Re-enable exit-on-error
@@ -927,6 +970,107 @@ EOF
     return 0
 }
 
+# Helper function to update Docker DNS configuration
+update_docker_dns() {
+    # Check if Docker is installed
+    if ! command -v docker &>/dev/null; then
+        echo -e "  ${YELLOW}⚠ Docker not installed, skipping Docker DNS update${NC}"
+        return 0
+    fi
+    
+    # Detect DNS servers from current configuration
+    DNS_SERVERS=()
+    
+    # Try to get DNS from systemd-resolved
+    if systemctl is-active systemd-resolved &>/dev/null; then
+        DETECTED_DNS=$(resolvectl status 2>/dev/null | grep "DNS Servers:" -A 3 | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -3)
+        if [ -n "$DETECTED_DNS" ]; then
+            while IFS= read -r dns_ip; do
+                # Skip loopback addresses
+                if [[ "$dns_ip" != "127."* ]]; then
+                    DNS_SERVERS+=("\"$dns_ip\"")
+                fi
+            done <<< "$DETECTED_DNS"
+        fi
+    fi
+    
+    # Fallback to resolv.conf if no DNS found yet
+    if [ ${#DNS_SERVERS[@]} -eq 0 ]; then
+        DETECTED_DNS=$(grep "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | head -3)
+        if [ -n "$DETECTED_DNS" ]; then
+            while IFS= read -r dns_ip; do
+                # Skip loopback addresses
+                if [[ "$dns_ip" != "127."* ]]; then
+                    DNS_SERVERS+=("\"$dns_ip\"")
+                fi
+            done <<< "$DETECTED_DNS"
+        fi
+    fi
+    
+    # Final fallback to Google DNS
+    if [ ${#DNS_SERVERS[@]} -eq 0 ]; then
+        DNS_SERVERS=("\"8.8.8.8\"" "\"8.8.4.4\"")
+        echo "  ⚠ No DNS servers detected, using Google DNS (8.8.8.8, 8.8.4.4)"
+    else
+        echo "  ✓ Detected DNS servers: ${DNS_SERVERS[@]//\"/}"
+    fi
+    
+    # Build DNS JSON array
+    DNS_JSON=$(IFS=,; echo "${DNS_SERVERS[*]}")
+    
+    # Backup existing daemon.json
+    if [ -f /etc/docker/daemon.json ]; then
+        cp /etc/docker/daemon.json /etc/docker/daemon.json.backup-$(date +%s)
+        echo "  ✓ Backed up existing Docker configuration"
+        
+        # Read existing config and update DNS
+        if command -v jq &>/dev/null; then
+            # Use jq if available for safer JSON manipulation
+            jq ".dns = [$DNS_JSON]" /etc/docker/daemon.json > /etc/docker/daemon.json.tmp
+            mv /etc/docker/daemon.json.tmp /etc/docker/daemon.json
+        else
+            # Fallback: simple sed replacement (less safe but works)
+            # Remove existing "dns" line if present
+            sed -i '/"dns":/d' /etc/docker/daemon.json
+            # Add new "dns" line after the opening brace
+            sed -i "1 a\  \"dns\": [$DNS_JSON]," /etc/docker/daemon.json
+        fi
+    else
+        # Create new daemon.json with DNS
+        mkdir -p /etc/docker
+        cat > /etc/docker/daemon.json <<EOF
+{
+  "dns": [$DNS_JSON],
+  "log-driver": "local",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  },
+  "storage-driver": "overlay2",
+  "default-ulimits": {
+    "nofile": {
+      "Name": "nofile",
+      "Hard": 65536,
+      "Soft": 65536
+    }
+  }
+}
+EOF
+    fi
+    
+    echo "  ✓ Updated Docker DNS configuration"
+    
+    # Restart Docker to apply changes
+    echo "  Restarting Docker..."
+    systemctl restart docker 2>&1 | tail -3
+    
+    if [ $? -eq 0 ]; then
+        echo -e "  ${GREEN}✓ Docker restarted with new DNS settings${NC}"
+    else
+        echo -e "  ${YELLOW}⚠ Docker restart may have issues - check 'systemctl status docker'${NC}"
+    fi
+}
+
 # Configure DNS resolution
 configure_dns() {
     echo -e "${BLUE}[DNS CONFIGURATION]${NC}"
@@ -936,7 +1080,7 @@ configure_dns() {
     set +e
     
     # Show current DNS configuration
-    echo -e "${GREEN}[1/4] Checking current DNS configuration...${NC}"
+    echo -e "${GREEN}[1/5] Checking current DNS configuration...${NC}"
     echo ""
     
     # Check if systemd-resolved is active
@@ -958,7 +1102,7 @@ configure_dns() {
     fi
     
     echo ""
-    echo -e "${GREEN}[2/4] Choose DNS configuration:${NC}"
+    echo -e "${GREEN}[2/5] Choose DNS configuration:${NC}"
     echo ""
     echo -e "  ${GREEN}1${NC}) ${CYAN}Use DHCP/Automatic DNS${NC} (default)"
     echo "     • Let DHCP server provide DNS settings"
@@ -977,7 +1121,7 @@ configure_dns() {
     
     case $dns_choice in
         1)
-            echo -e "${GREEN}[3/4] Configuring automatic DNS (DHCP)...${NC}"
+            echo -e "${GREEN}[3/5] Configuring automatic DNS (DHCP)...${NC}"
             echo ""
             
             # Find the primary network interface
@@ -1011,7 +1155,7 @@ EOF
             
             echo "  ✓ Created netplan configuration for automatic DNS"
             echo ""
-            echo -e "${GREEN}[4/4] Applying configuration...${NC}"
+            echo -e "${GREEN}[4/5] Applying system DNS configuration...${NC}"
             
             # Apply netplan configuration
             netplan apply 2>&1 | tail -5
@@ -1034,6 +1178,11 @@ EOF
                     echo "  This may be temporary - try 'sudo resolvectl flush-caches'"
                 fi
                 
+                # Update Docker DNS
+                echo ""
+                echo -e "${GREEN}[5/5] Updating Docker DNS configuration...${NC}"
+                update_docker_dns
+                
                 echo ""
                 echo -e "${GREEN}✓ Automatic DNS configured${NC}"
             else
@@ -1048,7 +1197,7 @@ EOF
             ;;
             
         2)
-            echo -e "${GREEN}[3/4] Configuring custom DNS servers...${NC}"
+            echo -e "${GREEN}[3/5] Configuring custom DNS servers...${NC}"
             echo ""
             
             # Prompt for DNS servers
@@ -1136,7 +1285,7 @@ EOF
             
             echo "  ✓ Created netplan configuration with custom DNS"
             echo ""
-            echo -e "${GREEN}[4/4] Applying configuration...${NC}"
+            echo -e "${GREEN}[4/5] Applying system DNS configuration...${NC}"
             
             # Apply netplan configuration
             netplan apply 2>&1 | tail -5
@@ -1170,6 +1319,11 @@ EOF
                     echo "    • DNS server not reachable"
                     echo "    • Firewall blocking DNS (port 53)"
                 fi
+                
+                # Update Docker DNS
+                echo ""
+                echo -e "${GREEN}[5/5] Updating Docker DNS configuration...${NC}"
+                update_docker_dns
                 
                 echo ""
                 echo -e "${GREEN}✓ Custom DNS configured${NC}"
