@@ -31,9 +31,9 @@ check_root() {
 # Show menu
 show_menu() {
     clear
-    echo -e "${BLUE}????????????????????????????????????????????${NC}"
-    echo -e "${BLUE}?  IoT Edge Firewall Configuration          ?${NC}"
-    echo -e "${BLUE}????????????????????????????????????????????${NC}"
+    echo -e "${BLUE}════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}│  IoT Edge Firewall Configuration          │${NC}"
+    echo -e "${BLUE}════════════════════════════════════════════${NC}"
     echo ""
     echo "Select firewall configuration option:"
     echo ""
@@ -69,7 +69,7 @@ install_ufw() {
         echo -e "${YELLOW}UFW not installed. Installing...${NC}"
         apt-get update -qq > /dev/null 2>&1
         apt-get install -y ufw > /dev/null 2>&1
-        echo -e "${GREEN}? UFW installed${NC}"
+        echo -e "${GREEN}✓ UFW installed${NC}"
     fi
 }
 
@@ -86,7 +86,7 @@ save_config() {
 RTAC_IP=$rtac_ip
 MGMT_NETWORK=$mgmt_network
 EOF
-    echo -e "${GREEN}? Configuration saved to $FIREWALL_CONFIG${NC}"
+    echo -e "${GREEN}✓ Configuration saved to $FIREWALL_CONFIG${NC}"
 }
 
 # Load configuration
@@ -101,11 +101,11 @@ configure_basic_firewall() {
     echo -e "${BLUE}[BASIC FIREWALL CONFIGURATION]${NC}"
     echo ""
     echo "This will configure firewall rules for:"
-    echo "  � Azure IoT Hub connectivity (AMQPS, HTTPS)"
-    echo "  � Container registry access (HTTPS)"
-    echo "  � DNS resolution"
-    echo "  � System updates (Ubuntu, Microsoft)"
-    echo "  � NTP time synchronization"
+    echo "  • Azure IoT Hub connectivity (AMQPS, HTTPS)"
+    echo "  • Container registry access (HTTPS)"
+    echo "  • DNS resolution"
+    echo "  • System updates (Ubuntu, Microsoft)"
+    echo "  • NTP time synchronization"
     echo ""
     read -p "Continue? (y/N): " REPLY
     echo
@@ -155,16 +155,16 @@ configure_basic_firewall() {
     ufw --force enable > /dev/null 2>&1
     
     echo ""
-    echo -e "${GREEN}? Basic firewall configured and enabled${NC}"
+    echo -e "${GREEN}✓ Basic firewall configured and enabled${NC}"
     echo ""
     echo "Configured rules:"
-    echo "  � Outbound DNS (port 53)"
-    echo "  � Outbound NTP (port 123)"
-    echo "  � Outbound AMQPS to Azure (port 5671)"
-    echo "  � Outbound HTTPS (port 443)"
-    echo "  � Outbound HTTP (port 80)"
+    echo "  • Outbound DNS (port 53)"
+    echo "  • Outbound NTP (port 123)"
+    echo "  • Outbound AMQPS to Azure (port 5671)"
+    echo "  • Outbound HTTPS (port 443)"
+    echo "  • Outbound HTTP (port 80)"
     echo ""
-    echo -e "${YELLOW}??  SSH access not configured. Use Option 4 to enable SSH.${NC}"
+    echo -e "${YELLOW}⚠️  SSH access not configured. Use Option 4 to enable SSH.${NC}"
     echo ""
 }
 
@@ -192,10 +192,10 @@ configure_full_firewall() {
     
     echo ""
     echo "This will configure firewall rules for:"
-    echo "  � Azure IoT Hub connectivity"
-    echo "  � Container registry access"
-    echo "  � RTAC polling (HTTP/HTTPS to $RTAC_IP)"
-    echo "  � DNS, NTP, System updates"
+    echo "  • Azure IoT Hub connectivity"
+    echo "  • Container registry access"
+    echo "  • RTAC polling (HTTP/HTTPS to $RTAC_IP)"
+    echo "  • DNS, NTP, System updates"
     echo ""
     read -p "Continue? (y/N): " REPLY
     echo
@@ -256,18 +256,18 @@ configure_full_firewall() {
     save_config "$RTAC_IP" "$MGMT_NETWORK"
     
     echo ""
-    echo -e "${GREEN}? Full firewall configured and enabled${NC}"
+    echo -e "${GREEN}✓ Full firewall configured and enabled${NC}"
     echo ""
     echo "Configured rules:"
-    echo "  � Outbound DNS (port 53)"
-    echo "  � Outbound NTP (port 123)"
-    echo "  � Outbound AMQPS to Azure (port 5671)"
-    echo "  � Outbound HTTPS (port 443)"
-    echo "  � Outbound HTTP (port 80)"
-    echo "  � Outbound HTTP to RTAC ($RTAC_IP:80)"
-    echo "  � Outbound HTTPS to RTAC ($RTAC_IP:443)"
+    echo "  • Outbound DNS (port 53)"
+    echo "  • Outbound NTP (port 123)"
+    echo "  • Outbound AMQPS to Azure (port 5671)"
+    echo "  • Outbound HTTPS (port 443)"
+    echo "  • Outbound HTTP (port 80)"
+    echo "  • Outbound HTTP to RTAC ($RTAC_IP:80)"
+    echo "  • Outbound HTTPS to RTAC ($RTAC_IP:443)"
     echo ""
-    echo -e "${YELLOW}??  SSH access not configured. Use Option 4 to enable SSH.${NC}"
+    echo -e "${YELLOW}⚠️  SSH access not configured. Use Option 4 to enable SSH.${NC}"
     echo ""
 }
 
@@ -290,8 +290,8 @@ add_rtac_access() {
     
     echo ""
     echo "This will add firewall rules for:"
-    echo "  � HTTP access to $RTAC_IP (port 80)"
-    echo "  � HTTPS access to $RTAC_IP (port 443)"
+    echo "  • HTTP access to $RTAC_IP (port 80)"
+    echo "  • HTTPS access to $RTAC_IP (port 443)"
     echo ""
     read -p "Continue? (y/N): " REPLY
     echo
@@ -309,11 +309,11 @@ add_rtac_access() {
     # Save config
     save_config "$RTAC_IP" "$MGMT_NETWORK"
     
-    echo -e "${GREEN}? RTAC access configured${NC}"
+    echo -e "${GREEN}✓ RTAC access configured${NC}"
     echo ""
     echo "Added rules:"
-    echo "  � Outbound HTTP to $RTAC_IP (port 80)"
-    echo "  � Outbound HTTPS to $RTAC_IP (port 443)"
+    echo "  • Outbound HTTP to $RTAC_IP (port 80)"
+    echo "  • Outbound HTTPS to $RTAC_IP (port 443)"
     echo ""
 }
 
@@ -359,14 +359,14 @@ configure_ssh_access() {
             # Save config
             save_config "$RTAC_IP" "$MGMT_NETWORK"
             
-            echo -e "${GREEN}? SSH access configured${NC}"
+            echo -e "${GREEN}✓ SSH access configured${NC}"
             echo ""
             echo "SSH access allowed from: $MGMT_NETWORK"
             echo ""
             ;;
             
         2)
-            echo -e "${YELLOW}??  WARNING: This will allow SSH from ANY IP address${NC}"
+            echo -e "${YELLOW}⚠️  WARNING: This will allow SSH from ANY IP address${NC}"
             echo "This is NOT recommended for production systems."
             echo ""
             read -p "Are you sure? (y/N): " REPLY
@@ -381,7 +381,7 @@ configure_ssh_access() {
             # Add SSH rule (allow from anywhere)
             ufw allow 22/tcp comment 'SSH from anywhere' > /dev/null 2>&1
             
-            echo -e "${YELLOW}? SSH access allowed from anywhere${NC}"
+            echo -e "${YELLOW}✓ SSH access allowed from anywhere${NC}"
             echo ""
             echo -e "${RED}WARNING: SSH is now accessible from the entire internet.${NC}"
             echo "Consider using a VPN or restricting to a specific network."
@@ -433,9 +433,9 @@ test_connectivity() {
     # Test DNS
     echo -e "${CYAN}[1/6] Testing DNS resolution...${NC}"
     if nslookup google.com > /dev/null 2>&1; then
-        echo -e "${GREEN}  ? DNS working${NC}"
+        echo -e "${GREEN}  ✓ DNS working${NC}"
     else
-        echo -e "${RED}  ? DNS failed${NC}"
+        echo -e "${RED}  ✗ DNS failed${NC}"
         echo -e "${YELLOW}  Check: Allow UDP/TCP port 53${NC}"
     fi
     echo ""
@@ -443,9 +443,9 @@ test_connectivity() {
     # Test NTP
     echo -e "${CYAN}[2/6] Testing NTP sync...${NC}"
     if timedatectl status | grep -q "System clock synchronized: yes"; then
-        echo -e "${GREEN}  ? NTP synchronized${NC}"
+        echo -e "${GREEN}  ✓ NTP synchronized${NC}"
     else
-        echo -e "${YELLOW}  ? NTP not synchronized (may take time)${NC}"
+        echo -e "${YELLOW}  ⚠ NTP not synchronized (may take time)${NC}"
         echo -e "${YELLOW}  Check: Allow UDP port 123${NC}"
     fi
     echo ""
@@ -453,9 +453,9 @@ test_connectivity() {
     # Test HTTPS
     echo -e "${CYAN}[3/6] Testing HTTPS connectivity...${NC}"
     if curl -s --connect-timeout 5 https://www.google.com > /dev/null 2>&1; then
-        echo -e "${GREEN}  ? HTTPS working${NC}"
+        echo -e "${GREEN}  ✓ HTTPS working${NC}"
     else
-        echo -e "${RED}  ? HTTPS failed${NC}"
+        echo -e "${RED}  ✗ HTTPS failed${NC}"
         echo -e "${YELLOW}  Check: Allow TCP port 443${NC}"
     fi
     echo ""
@@ -463,23 +463,70 @@ test_connectivity() {
     # Test Azure IoT Hub (if iotedge is installed)
     echo -e "${CYAN}[4/6] Testing Azure IoT Hub connectivity...${NC}"
     if command -v iotedge &> /dev/null; then
-        if sudo iotedge check --verbose 2>&1 | grep -q "successfully connected"; then
-            echo -e "${GREEN}  ? IoT Hub connection working${NC}"
+        # Try to get IoT Hub hostname from iotedge config first
+        IOT_HUB_HOSTNAME=""
+        
+        if [ -f /etc/aziot/config.toml ]; then
+            CONFIG_HOSTNAME=$(grep -E "^hostname\s*=" /etc/aziot/config.toml 2>/dev/null | sed 's/.*"\(.*\)".*/\1/' || echo "")
+            if [ -n "$CONFIG_HOSTNAME" ]; then
+                IOT_HUB_HOSTNAME="$CONFIG_HOSTNAME"
+                echo "  Detected IoT Hub hostname from config: $IOT_HUB_HOSTNAME"
+            fi
+        fi
+        
+        # If not found, prompt user
+        if [ -z "$IOT_HUB_HOSTNAME" ]; then
+            echo "  IoT Hub hostname not found in configuration."
+            read -p "  Enter IoT Hub hostname (e.g., YourIoTHub.azure-devices.net): " IOT_HUB_HOSTNAME
+            
+            # Validate input
+            if [ -z "$IOT_HUB_HOSTNAME" ]; then
+                echo -e "${YELLOW}  ⚠ No hostname provided, skipping IoT Hub test${NC}"
+                echo ""
+                return
+            fi
+        fi
+        
+        echo ""
+        
+        # Test HTTPS connectivity to IoT Hub
+        if curl -s --connect-timeout 5 https://$IOT_HUB_HOSTNAME > /dev/null 2>&1; then
+            echo -e "${GREEN}  ✓ IoT Hub HTTPS reachable ($IOT_HUB_HOSTNAME)${NC}"
         else
-            echo -e "${YELLOW}  ? IoT Hub connection check inconclusive${NC}"
-            echo -e "${YELLOW}  Check: Allow TCP port 5671 (AMQPS) and 443 (HTTPS)${NC}"
+            echo -e "${RED}  ✗ IoT Hub HTTPS unreachable ($IOT_HUB_HOSTNAME)${NC}"
+            echo -e "${YELLOW}  Check: Allow TCP port 443 to *.azure-devices.net${NC}"
+        fi
+        
+        # Test AMQPS port connectivity (primary protocol for IoT Edge)
+        if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$IOT_HUB_HOSTNAME/5671" 2>/dev/null; then
+            echo -e "${GREEN}  ✓ IoT Hub AMQPS port reachable (port 5671)${NC}"
+        else
+            echo -e "${YELLOW}  ⚠ IoT Hub AMQPS port unreachable${NC}"
+            echo -e "${YELLOW}  Check: Allow TCP port 5671 to *.azure-devices.net${NC}"
+        fi
+        
+        # Check if IoT Edge is actually connected and running
+        if systemctl is-active --quiet iotedge 2>/dev/null; then
+            if sudo iotedge list 2>/dev/null | grep -q "edgeAgent"; then
+                echo -e "${GREEN}  ✓ IoT Edge runtime connected and running${NC}"
+            else
+                echo -e "${YELLOW}  ⚠ IoT Edge not yet provisioned or modules not deployed${NC}"
+                echo -e "${YELLOW}  Note: This is normal before DPS provisioning is complete${NC}"
+            fi
+        else
+            echo -e "${YELLOW}  ⚠ IoT Edge service not running${NC}"
         fi
     else
-        echo -e "${YELLOW}  ? IoT Edge not installed, skipping${NC}"
+        echo -e "${YELLOW}  ⚠ IoT Edge not installed, skipping${NC}"
     fi
     echo ""
     
     # Test Container Registry
     echo -e "${CYAN}[5/6] Testing Container Registry access...${NC}"
     if curl -s --connect-timeout 5 https://mcr.microsoft.com > /dev/null 2>&1; then
-        echo -e "${GREEN}  ? MCR accessible${NC}"
+        echo -e "${GREEN}  ✓ MCR accessible${NC}"
     else
-        echo -e "${RED}  ? MCR failed${NC}"
+        echo -e "${RED}  ✗ MCR failed${NC}"
         echo -e "${YELLOW}  Check: Allow TCP port 443 to mcr.microsoft.com${NC}"
     fi
     echo ""
@@ -488,14 +535,14 @@ test_connectivity() {
     echo -e "${CYAN}[6/6] Testing RTAC connectivity...${NC}"
     if [ -n "$RTAC_IP" ]; then
         if curl -s --connect-timeout 5 http://$RTAC_IP > /dev/null 2>&1; then
-            echo -e "${GREEN}  ? RTAC accessible at $RTAC_IP${NC}"
+            echo -e "${GREEN}  ✓ RTAC accessible at $RTAC_IP${NC}"
         else
-            echo -e "${RED}  ? RTAC not accessible at $RTAC_IP${NC}"
+            echo -e "${RED}  ✗ RTAC not accessible at $RTAC_IP${NC}"
             echo -e "${YELLOW}  Check: RTAC device is powered on and reachable${NC}"
             echo -e "${YELLOW}  Check: Allow TCP port 80/443 to $RTAC_IP${NC}"
         fi
     else
-        echo -e "${YELLOW}  ? RTAC IP not configured, skipping${NC}"
+        echo -e "${YELLOW}  ⚠ RTAC IP not configured, skipping${NC}"
     fi
     echo ""
     
@@ -519,7 +566,7 @@ disable_firewall() {
     
     if command -v ufw &> /dev/null; then
         ufw --force disable > /dev/null 2>&1
-        echo -e "${YELLOW}? Firewall disabled${NC}"
+        echo -e "${YELLOW}✓ Firewall disabled${NC}"
     else
         echo -e "${RED}UFW not installed${NC}"
     fi
@@ -541,14 +588,14 @@ enable_firewall() {
     RULE_COUNT=$(ufw status numbered 2>/dev/null | grep -c "^\[" || echo "0")
     
     if [ "$RULE_COUNT" -eq 0 ]; then
-        echo -e "${YELLOW}??  No firewall rules configured.${NC}"
+        echo -e "${YELLOW}⚠️  No firewall rules configured.${NC}"
         echo "Use Option 1 or 2 to configure firewall rules first."
         echo ""
         return
     fi
     
     ufw --force enable > /dev/null 2>&1
-    echo -e "${GREEN}? Firewall enabled${NC}"
+    echo -e "${GREEN}✓ Firewall enabled${NC}"
     echo ""
     echo "Active rules: $RULE_COUNT"
     echo ""

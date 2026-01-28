@@ -172,14 +172,22 @@ sudo bash ./configure-firewall.sh
 # Select: 6 (Test Connectivity)
 
 # If Azure IoT Hub test fails:
+# The test checks:
+#   1. HTTPS connectivity to ?.azure-devices.net (port 443)
+#   2. AMQPS connectivity to ?.azure-devices.net (port 5671)
+#   3. IoT Edge runtime status
+
+# If HTTPS or AMQPS tests fail:
 # Check rules:
 sudo bash ./configure-firewall.sh
 # Select: 5 (Show Current Firewall Rules)
 
-# Verify ports 5671 and 443 are allowed outbound
+# Verify ports 5671 and 443 are allowed outbound to *.azure-devices.net
 ```
 
-**Solution**: Reconfigure firewall with Option 1 or 2.
+**Note**: For DPS-provisioned devices (Device Provisioning Service), the connectivity test checks the IoT Hub hostname directly (`OpenPointIoTHub.azure-devices.net`) rather than relying on `iotedge check`, which may show inconclusive results before DPS provisioning completes.
+
+**Solution**: Reconfigure firewall with Option 1 or 2 to ensure AMQPS (port 5671) and HTTPS (port 443) are allowed.
 
 ### Issue: Can't SSH to device
 
