@@ -506,7 +506,15 @@ test_connectivity() {
         fi
         
         # Check if IoT Edge is actually connected and running
-        if systemctl is-active --quiet iotedge 2>/dev/null; then
+        # Check for both old (iotedge) and new (aziot-edged) service names
+        IOT_EDGE_RUNNING=false
+        if systemctl is-active --quiet aziot-edged 2>/dev/null; then
+            IOT_EDGE_RUNNING=true
+        elif systemctl is-active --quiet iotedge 2>/dev/null; then
+            IOT_EDGE_RUNNING=true
+        fi
+        
+        if [ "$IOT_EDGE_RUNNING" = true ]; then
             if sudo iotedge list 2>/dev/null | grep -q "edgeAgent"; then
                 echo -e "${GREEN}  ✓ IoT Edge runtime connected and running${NC}"
             else
@@ -515,6 +523,7 @@ test_connectivity() {
             fi
         else
             echo -e "${YELLOW}  ⚠ IoT Edge service not running${NC}"
+            echo -e "${YELLOW}  Start with: sudo systemctl start aziot-edged${NC}"
         fi
     else
         echo -e "${YELLOW}  ⚠ IoT Edge not installed, skipping${NC}"
