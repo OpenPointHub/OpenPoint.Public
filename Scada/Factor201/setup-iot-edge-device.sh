@@ -67,12 +67,12 @@ show_menu() {
     echo -e "  ${GREEN}4${NC}) System Optimization - Swap, TRIM, watchdog, file descriptors, network"
     echo -e "  ${GREEN}5${NC}) Container Engine - Install and configure Moby/Docker"
     echo -e "  ${GREEN}6${NC}) IoT Edge Runtime - Install Azure IoT Edge and TPM tools"
-    echo -e "  ${GREEN}7${NC}) Extract TPM Key - Get TPM endorsement key for DPS enrollment"
-    echo -e "  ${GREEN}8${NC}) Persistent Storage - Configure edgeAgent/edgeHub persistent storage"
-    echo -e "  ${GREEN}9${NC}) Configure DNS - Set custom DNS servers or use automatic resolution"
+    echo -e "  ${GREEN}7${NC}) Persistent Storage - Configure edgeAgent/edgeHub persistent storage"
+    echo -e "  ${GREEN}8${NC}) Configure DNS - Set custom DNS servers or use automatic resolution"
     echo ""
-    echo -e "  ${GREEN}10${NC}) Clean Duplicate Config - Remove duplicate entries from previous runs"
-    echo -e "  ${GREEN}11${NC}) Configure Update Policy - Security-only, manual, or disable updates"
+    echo -e "  ${GREEN}9${NC}) Clean Duplicate Config - Remove duplicate entries from previous runs"
+    echo -e "  ${GREEN}10${NC}) Configure Update Policy - Security-only, manual, or disable updates"
+    echo -e "  ${GREEN}11${NC}) Extract TPM Key - Get TPM endorsement key for DPS enrollment"
     echo ""
     echo -e "  ${YELLOW}0${NC}) Exit"
     echo ""
@@ -200,18 +200,18 @@ show_requirements() {
 cleanup_duplicates() {
     echo -e "${BLUE}Checking for duplicate configuration entries...${NC}"
     
-    # Clean up sysctl.conf duplicates
+    # Clean up sysctl.conf duplicates (removes duplicate lines, keeps first occurrence)
     if [ -f /etc/sysctl.conf ]; then
         awk '!seen[$0]++' /etc/sysctl.conf > /etc/sysctl.conf.tmp
         mv /etc/sysctl.conf.tmp /etc/sysctl.conf
         echo -e "${GREEN}  ✓ Cleaned sysctl.conf${NC}"
     fi
     
-    # Clean up limits.conf duplicates
+    # Clean up limits.conf duplicates (removes duplicate lines, keeps first occurrence)
     if [ -f /etc/security/limits.conf ]; then
-        grep -v "nofile 65535" /etc/security/limits.conf > /etc/security/limits.conf.tmp || true
+        awk '!seen[$0]++' /etc/security/limits.conf > /etc/security/limits.conf.tmp
         mv /etc/security/limits.conf.tmp /etc/security/limits.conf
-        echo -e "${GREEN}  ✓ Cleaned limits.conf (will re-add correct entries)${NC}"
+        echo -e "${GREEN}  ✓ Cleaned limits.conf${NC}"
     fi
     
     echo ""
@@ -1381,22 +1381,23 @@ configure_update_policy() {
     echo ""
     echo -e "${CYAN}Choose how system updates are handled:${NC}"
     echo ""
-    echo -e "  ${GREEN}1${NC}) ${CYAN}Security-only automatic${NC} (recommended for production)"
-    echo "     • Critical security patches installed automatically"
-    echo "     • Feature updates require manual approval"
-    echo "     • Never auto-reboots (operator must reboot manually)"
-    echo "     • Email notification when updates applied"
+    echo -e "  ${GREEN}1${NC}) ${CYAN}Security auto-update with auto-reboot${NC} (recommended for production)"
+    echo "     • Security patches installed automatically at 3 AM CST (9 AM UTC)"
+    echo "     • System reboots automatically if needed (3:30 AM CST / 9:30 AM UTC)"
+    echo "     • Most secure - updates are immediately active"
+    echo "     • Minimal downtime (~12-17 minutes during update window)"
     echo ""
-    echo -e "  ${GREEN}2${NC}) ${CYAN}Manual updates only${NC} (maximum control)"
+    echo -e "  ${GREEN}2${NC}) ${CYAN}Manual updates only${NC}"
     echo "     • All updates require manual trigger"
     echo "     • Update via 'sudo apt update && sudo apt upgrade'"
-    echo "     • Or trigger remotely via IoT Hub"
-    echo "     • Best for critical systems or testing"
+    echo "     • Operator must reboot manually when needed"
+    echo "     • Best for test environments or strict change control"
     echo ""
-    echo -e "  ${GREEN}3${NC}) ${YELLOW}Disable all automatic updates${NC} (for testing only)"
-    echo "     • Completely disables automatic updates"
-    echo "     • System may become vulnerable over time"
-    echo "     • NOT recommended for production"
+    echo -e "  ${GREEN}3${NC}) ${YELLOW}All auto-updates with reboot${NC} (not recommended for production)"
+    echo "     • All updates (security + feature) installed automatically at 3 AM CST"
+    echo "     • System reboots automatically if needed (3:30 AM CST)"
+    echo "     • ⚠️  May introduce unexpected changes"
+    echo "     • Only use in development environments"
     echo ""
     echo -e "  ${GREEN}4${NC}) Show current policy"
     echo ""
@@ -1405,7 +1406,7 @@ configure_update_policy() {
     
     case $choice in
         1)
-            echo -e "${GREEN}Configuring security-only automatic updates...${NC}"
+            echo -e "${GREEN}Configuring security auto-update with auto-reboot...${NC}"
             echo ""
             
             # Wait for package manager
@@ -1415,8 +1416,8 @@ configure_update_policy() {
             echo "Installing unattended-upgrades package..."
             apt-get install -y unattended-upgrades apt-listchanges 2>&1 | tail -5
             
-            # Configure for security updates only
-            echo "Configuring for security updates only..."
+            # Configure for security updates only with auto-reboot
+            echo "Configuring for security updates with automatic reboot..."
             cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
 // Automatic security updates for IoT Edge devices
 // Configuration for OpenPoint SCADA Polling Module
@@ -1438,9 +1439,10 @@ Unattended-Upgrade::MinimalSteps "true";
 // Install updates on shutdown (safer than during operation)
 Unattended-Upgrade::InstallOnShutdown "false";
 
-// NEVER automatically reboot
-Unattended-Upgrade::Automatic-Reboot "false";
-Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+// Automatically reboot if required (during maintenance window)
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+Unattended-Upgrade::Automatic-Reboot-Time "09:30";
 
 // Email notification (configure your email)
 // Unattended-Upgrade::Mail "ops@openpoint.com";
@@ -1458,7 +1460,7 @@ Unattended-Upgrade::SyslogEnable "true";
 Unattended-Upgrade::SyslogFacility "daemon";
 EOF
             
-            # Configure update schedule (3 AM daily)
+            # Configure update schedule (3 AM CST = 9 AM UTC)
             cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 // Update schedule for security patches
 APT::Periodic::Update-Package-Lists "1";
@@ -1467,13 +1469,13 @@ APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
 EOF
             
-            # Set specific time (3 AM)
+            # Set specific time (9 AM UTC = 3 AM CST)
             systemctl edit --full --force apt-daily.timer > /dev/null 2>&1 <<'EOF'
 [Unit]
 Description=Daily apt download activities
 
 [Timer]
-OnCalendar=03:00
+OnCalendar=09:00
 RandomizedDelaySec=0
 Persistent=true
 
@@ -1486,16 +1488,18 @@ EOF
             systemctl start unattended-upgrades > /dev/null 2>&1
             
             echo ""
-            echo -e "${GREEN}✓ Security-only automatic updates enabled${NC}"
+            echo -e "${GREEN}✓ Security auto-update with auto-reboot enabled${NC}"
             echo ""
             echo "Configuration:"
-            echo "  • Security updates: Automatic (daily at 3 AM)"
+            echo "  • Security updates: Automatic (daily at 9 AM UTC / 3 AM CST)"
             echo "  • Feature updates: Manual"
-            echo "  • Auto-reboot: Disabled (never)"
+            echo "  • Auto-reboot: Enabled (at 9:30 AM UTC / 3:30 AM CST if needed)"
             echo "  • Email notifications: Disabled (uncomment in config to enable)"
             echo ""
-            echo "To check for reboot requirement:"
-            echo "  cat /var/run/reboot-required.pkgs"
+            echo "Update window: 9:00 AM - 11:00 AM UTC (3:00 AM - 5:00 AM CST)"
+            echo "  - Updates install: 9:00-9:30 AM UTC (3:00-3:30 AM CST)"
+            echo "  - Reboot if needed: 9:30 AM UTC (3:30 AM CST)"
+            echo "  - System ready: ~9:35 AM UTC (~3:35 AM CST)"
             echo ""
             echo "To view update logs:"
             echo "  tail -100 /var/log/unattended-upgrades/unattended-upgrades.log"
@@ -1508,34 +1512,6 @@ EOF
             # Stop and disable automatic updates
             systemctl stop unattended-upgrades 2>/dev/null || true
             systemctl disable unattended-upgrades 2>/dev/null || true
-            systemctl stop apt-daily.timer 2>/dev/null || true
-            systemctl disable apt-daily.timer 2>/dev/null || true
-            systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
-            systemctl disable apt-daily-upgrade.timer 2>/dev/null || true
-            
-            echo -e "${GREEN}✓ Automatic updates disabled${NC}"
-            echo ""
-            echo "All updates now require manual action:"
-            echo ""
-            echo "Option 1: Local manual update"
-            echo "  sudo apt update && sudo apt upgrade -y"
-            echo ""
-            echo "Option 2: Use setup script Option 3"
-            echo "  sudo bash ./setup-iot-edge-device.sh"
-            echo "  (then select option 3)"
-            echo ""
-            echo "Option 3: Remote trigger via IoT Hub"
-            echo "  (requires implementing RunSystemUpdate direct method)"
-            echo ""
-            ;;
-            
-        3)
-            echo -e "${YELLOW}Disabling all automatic updates...${NC}"
-            echo ""
-            
-            # Stop and disable everything
-            systemctl stop unattended-upgrades 2>/dev/null || true
-            systemctl disable unattended-upgrades 2>/dev/null || true
             systemctl mask unattended-upgrades 2>/dev/null || true
             systemctl stop apt-daily.timer 2>/dev/null || true
             systemctl disable apt-daily.timer 2>/dev/null || true
@@ -1544,14 +1520,116 @@ EOF
             systemctl disable apt-daily-upgrade.timer 2>/dev/null || true
             systemctl mask apt-daily-upgrade.timer 2>/dev/null || true
             
-            echo -e "${YELLOW}✓ All automatic updates disabled${NC}"
+            echo -e "${GREEN}✓ Automatic updates disabled${NC}"
             echo ""
-            echo -e "${RED}⚠️  WARNING: System will not receive security updates automatically${NC}"
+            echo "All updates now require manual action:"
             echo ""
-            echo "You must manually update the system regularly:"
+            echo "Option 1: Local manual update"
             echo "  sudo apt update && sudo apt upgrade -y"
+            echo "  sudo reboot  # If /var/run/reboot-required exists"
             echo ""
-            echo -e "${YELLOW}This configuration is NOT recommended for production systems.${NC}"
+            echo "Option 2: Use setup script"
+            echo "  sudo bash ./setup-iot-edge-device.sh"
+            echo "  (then select option 3: System Updates)"
+            echo ""
+            ;;
+            
+        3)
+            echo -e "${YELLOW}Configuring all auto-updates with reboot...${NC}"
+            echo ""
+            
+            # Wait for package manager
+            wait_for_package_manager || return 1
+            
+            # Install unattended-upgrades
+            echo "Installing unattended-upgrades package..."
+            apt-get install -y unattended-upgrades apt-listchanges 2>&1 | tail -5
+            
+            # Configure for ALL updates with auto-reboot
+            echo "Configuring for all updates with automatic reboot..."
+            cat > /etc/apt/apt.conf.d/50unattended-upgrades <<'EOF'
+// Automatic updates (ALL) for IoT Edge devices
+// Configuration for OpenPoint SCADA Polling Module
+// WARNING: Not recommended for production
+
+Unattended-Upgrade::Allowed-Origins {
+    // Security updates
+    "${distro_id}:${distro_codename}-security";
+    
+    // Feature/bug fix updates (ENABLED - may cause unexpected changes)
+    "${distro_id}:${distro_codename}-updates";
+};
+
+// Automatically get all updates
+Unattended-Upgrade::DevRelease "false";
+
+// Split upgrade into minimal steps (more reliable)
+Unattended-Upgrade::MinimalSteps "true";
+
+// Install updates on shutdown (safer than during operation)
+Unattended-Upgrade::InstallOnShutdown "false";
+
+// Automatically reboot if required
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+Unattended-Upgrade::Automatic-Reboot-Time "09:30";
+
+// Email notification (configure your email)
+// Unattended-Upgrade::Mail "ops@openpoint.com";
+// Unattended-Upgrade::MailReport "on-change";
+
+// Remove unused kernel packages
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+// Automatically fix interrupted dpkg
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+
+// Log to syslog
+Unattended-Upgrade::SyslogEnable "true";
+Unattended-Upgrade::SyslogFacility "daemon";
+EOF
+            
+            # Configure update schedule (3 AM CST = 9 AM UTC)
+            cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+// Update schedule for all updates
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+            
+            # Set specific time (9 AM UTC = 3 AM CST)
+            systemctl edit --full --force apt-daily.timer > /dev/null 2>&1 <<'EOF'
+[Unit]
+Description=Daily apt download activities
+
+[Timer]
+OnCalendar=09:00
+RandomizedDelaySec=0
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+            
+            # Enable the service
+            systemctl enable unattended-upgrades > /dev/null 2>&1
+            systemctl start unattended-upgrades > /dev/null 2>&1
+            
+            echo ""
+            echo -e "${YELLOW}✓ All auto-updates with auto-reboot enabled${NC}"
+            echo ""
+            echo "Configuration:"
+            echo "  • Security updates: Automatic (daily at 9 AM UTC / 3 AM CST)"
+            echo "  • Feature updates: Automatic (daily at 9 AM UTC / 3 AM CST)"
+            echo "  • Auto-reboot: Enabled (at 9:30 AM UTC / 3:30 AM CST if needed)"
+            echo ""
+            echo -e "${YELLOW}⚠️  WARNING: This may introduce unexpected changes${NC}"
+            echo -e "${YELLOW}   Not recommended for production systems${NC}"
+            echo ""
+            echo "To view update logs:"
+            echo "  tail -100 /var/log/unattended-upgrades/unattended-upgrades.log"
             ;;
             
         4)
@@ -1684,6 +1762,11 @@ full_setup() {
     echo ""
     read -p "Press ENTER to continue..." dummy
     
+    # Clean config files after optimization to remove any duplicates
+    # This ensures clean config before Docker and IoT Edge installation
+    cleanup_duplicates
+    read -p "Press ENTER to continue..." dummy
+    
     container_engine
     local step4_result=$?
     if [ $step4_result -ne 0 ]; then
@@ -1702,6 +1785,20 @@ full_setup() {
     local step5_result=$?
     if [ $step5_result -ne 0 ]; then
         echo -e "${RED}✗ Step 5 failed with exit code $step5_result${NC}"
+        echo "Continue anyway? (y/N): "
+        read -p "" REPLY
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            set -e
+            return 1
+        fi
+    fi
+    echo ""
+    read -p "Press ENTER to continue..." dummy
+    
+    persist_iot_edge_storage
+    local step6_result=$?
+    if [ $step6_result -ne 0 ]; then
+        echo -e "${RED}✗ Step 6 failed with exit code $step6_result${NC}"
         echo "Continue anyway? (y/N): "
         read -p "" REPLY
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -1732,13 +1829,13 @@ full_setup() {
     echo "   ✓ File descriptor limits increased"
     echo "   ✓ Moby container engine configured"
     echo "   ✓ Azure IoT Edge runtime installed"
+    echo "   ✓ Persistent storage configured"
     echo ""
     echo -e "${YELLOW}⚠️  Please reboot the system:${NC}"
     echo "   sudo reboot"
     echo ""
     echo "After reboot, run this script again and select:"
-    echo "   7. Extract TPM Key - Get registration ID and endorsement key"
-    echo "   8. Persistent Storage - Configure persistent storage (if needed)"
+    echo "   11. Extract TPM Key - Get registration ID and endorsement key"
     echo ""
     echo "To view container logs:"
     echo "   docker logs -f <container_name>"
@@ -1784,27 +1881,26 @@ main() {
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             7)
-                extract_tpm_key
-                read -p "Press ENTER to return to menu..." dummy
-                ;;
-            8)
                 persist_iot_edge_storage
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
-            9)
+            8)
                 configure_dns
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
-            10)
+            9)
                 cleanup_duplicates
                 echo -e "${GREEN}✓ Cleanup complete${NC}"
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
-            11)
+            10)
                 configure_update_policy
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
-
+            11)
+                extract_tpm_key
+                read -p "Press ENTER to return to menu..." dummy
+                ;;
             0)
                 echo "Exiting..."
                 exit 0
