@@ -7,7 +7,8 @@ This directory contains scripts for setting up and managing Raspberry Pi Factor 
 ```
 OpenPoint.Public/Scada/Factor201/
 ├── README.md                    # This documentation
-└── setup-iot-edge-device.sh    # Main setup script (all-in-one)
+├── setup-iot-edge-device.sh    # Main setup script (all-in-one)
+└── configure-firewall.sh       # Firewall configuration script
 ```
 
 ## 📄 **Scripts**
@@ -15,6 +16,8 @@ OpenPoint.Public/Scada/Factor201/
 | Script | Purpose | Public URL |
 |--------|---------|------------|
 | `setup-iot-edge-device.sh` | Main setup script with integrated TPM key extraction | [Download](https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/setup-iot-edge-device.sh) |
+| `configure-firewall.sh` | Firewall configuration for IoT Edge and SCADA | [Download](https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/configure-firewall.sh) |
+
 
 ## 🚀 **Quick Start**
 
@@ -183,7 +186,7 @@ sudo reboot
 
 # 2. Extract TPM key (send to Azure administrator)
 sudo bash ./setup-iot-edge-device.sh
-# Select option 7
+# Select option 11
 
 # 3. View container logs
 docker logs -f <container_name>
@@ -196,3 +199,31 @@ docker stats
 sudo iotedge check
 sudo iotedge system status
 ```
+
+## 🔒 **Firewall Configuration**
+
+For secure production deployments, configure the firewall after initial setup:
+
+```bash
+# Download firewall configuration script
+wget https://raw.githubusercontent.com/OpenPointHub/OpenPoint.Public/master/Scada/Factor201/configure-firewall.sh
+chmod +x configure-firewall.sh
+
+# Run firewall configuration
+sudo bash ./configure-firewall.sh
+# Select option 2 (Full Firewall - IoT Edge + SCADA)
+# Enter RTAC IP address (e.g., 192.168.1.100)
+# Select option 4 (Configure SSH Access)
+# Enter management network (e.g., 192.168.1.0/24)
+# Select option 6 (Test Connectivity)
+```
+
+**Firewall configures rules for:**
+- Azure IoT Hub connectivity (AMQPS, HTTPS)
+- Container registry access
+- RTAC polling (HTTP/HTTPS)
+- DNS, NTP, system updates
+- SSH access (restricted to management network)
+
+**See**: [Firewall Configuration Guide](FIREWALL_CONFIGURATION.md) for detailed documentation
+
