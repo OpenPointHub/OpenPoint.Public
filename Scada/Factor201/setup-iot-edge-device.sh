@@ -922,13 +922,20 @@ enable_tpm_hardware() {
     echo -e "${GREEN}[2/5] Enabling SPI interface...${NC}"
     if grep -q "^dtparam=spi=on" "$CONFIG_FILE"; then
         echo "  ✓ SPI already enabled"
-    elif grep -q "^#dtparam=spi=on" "$CONFIG_FILE"; then
-        sed -i 's/^#dtparam=spi=on/dtparam=spi=on/' "$CONFIG_FILE"
+    elif grep -q "^#.*dtparam=spi=on" "$CONFIG_FILE"; then
+        sed -i 's/^#.*dtparam=spi=on/dtparam=spi=on/' "$CONFIG_FILE"
         echo "  ✓ SPI enabled (uncommented)"
         CHANGES_MADE=1
     else
-        echo "dtparam=spi=on" >> "$CONFIG_FILE"
-        echo "  ✓ SPI enabled (added)"
+        # dtparam must appear BEFORE any dtoverlay lines in the boot config
+        local FIRST_OVERLAY_LINE=$(grep -n "^dtoverlay=" "$CONFIG_FILE" | head -1 | cut -d: -f1)
+        if [ -n "$FIRST_OVERLAY_LINE" ]; then
+            sed -i "${FIRST_OVERLAY_LINE}i dtparam=spi=on" "$CONFIG_FILE"
+            echo "  ✓ SPI enabled (inserted before overlays)"
+        else
+            echo "dtparam=spi=on" >> "$CONFIG_FILE"
+            echo "  ✓ SPI enabled (added)"
+        fi
         CHANGES_MADE=1
     fi
     
