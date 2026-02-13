@@ -819,6 +819,58 @@ iotedge_runtime() {
     return 0
 }
 
+# Configure udev rules to give IoT Edge (aziottpm group) access to TPM devices
+configure_tpm_udev_rules() {
+    local RULES_FILE="/etc/udev/rules.d/tpmaccess.rules"
+    local RULES_NEEDED=0
+    
+    if [ -f "$RULES_FILE" ] && grep -q "aziottpm" "$RULES_FILE"; then
+        echo "  ✓ IoT Edge TPM udev rules already configured"
+    else
+        RULES_NEEDED=1
+    fi
+    
+    # Check if aziottpm group exists (created by aziot-edge package)
+    if ! getent group aziottpm &>/dev/null; then
+        echo -e "  ${YELLOW}⚠ Group 'aziottpm' does not exist yet${NC}"
+        echo "    It will be created when Azure IoT Edge is installed (option 6)."
+        echo "    Re-run option 12 after installing IoT Edge to apply udev rules."
+        return 0
+    fi
+    
+    if [ $RULES_NEEDED -eq 1 ]; then
+        echo "  Creating udev rules for IoT Edge TPM access..."
+        cat > "$RULES_FILE" <<'EOF'
+# allow aziottpm access to tpm0 and tpmrm0
+KERNEL=="tpm0", SUBSYSTEM=="tpm", OWNER="root", GROUP="aziottpm", MODE="0660"
+KERNEL=="tpmrm0", SUBSYSTEM=="tpmrm", OWNER="root", GROUP="aziottpm", MODE="0660"
+EOF
+        echo "  ✓ Created $RULES_FILE"
+    fi
+    
+    # Trigger udev to apply the new rules
+    /bin/udevadm trigger --subsystem-match=tpm --subsystem-match=tpmrm 2>/dev/null || true
+    echo "  ✓ Triggered udev to apply rules"
+    
+    # Verify permissions if TPM devices exist
+    if [ -e /dev/tpm0 ] || [ -e /dev/tpmrm0 ]; then
+        echo ""
+        echo "  Verifying TPM device permissions:"
+        ls -l /dev/tpm* 2>/dev/null | while read -r line; do
+            echo "    $line"
+        done
+        
+        # Check if permissions are correct
+        if ls -l /dev/tpm0 2>/dev/null | grep -q "aziottpm"; then
+            echo -e "  ${GREEN}✓ IoT Edge has access to TPM devices${NC}"
+        else
+            echo -e "  ${YELLOW}⚠ Permissions not yet applied - may require a reboot${NC}"
+        fi
+    else
+        echo "  ℹ️  TPM devices not present yet - rules will apply after reboot"
+    fi
+}
+
 # Enable Nuvoton NPCT750 TPM hardware on Factor 201
 enable_tpm_hardware() {
     echo -e "${BLUE}[TPM HARDWARE ENABLEMENT]${NC}"
@@ -841,7 +893,7 @@ enable_tpm_hardware() {
         return 1
     fi
     
-    echo -e "${GREEN}[1/4] Checking boot configuration...${NC}"
+    echo -e "${GREEN}[1/5] Checking boot configuration...${NC}"
     echo "  Config file: $CONFIG_FILE"
     echo ""
     
@@ -850,7 +902,12 @@ enable_tpm_hardware() {
     # Check if TPM is already detected
     if [ -e /dev/tpm0 ] || [ -e /dev/tpmrm0 ]; then
         echo -e "  ${GREEN}✓ TPM device already detected: $(ls /dev/tpm* 2>/dev/null | tr '\n' ' ')${NC}"
-        echo "  No changes needed. You can run option 11 to extract the TPM key."
+        echo ""
+        
+        # Still ensure udev rules are in place for IoT Edge access
+        configure_tpm_udev_rules
+        
+        echo "  You can run option 11 to extract the TPM key."
         echo ""
         set -e
         return 0
@@ -862,7 +919,7 @@ enable_tpm_hardware() {
     
     # Step 1: Enable SPI
     echo ""
-    echo -e "${GREEN}[2/4] Enabling SPI interface...${NC}"
+    echo -e "${GREEN}[2/5] Enabling SPI interface...${NC}"
     if grep -q "^dtparam=spi=on" "$CONFIG_FILE"; then
         echo "  ✓ SPI already enabled"
     elif grep -q "^#dtparam=spi=on" "$CONFIG_FILE"; then
@@ -877,7 +934,7 @@ enable_tpm_hardware() {
     
     # Step 2: Enable TPM overlay
     echo ""
-    echo -e "${GREEN}[3/4] Enabling Nuvoton TPM device tree overlay...${NC}"
+    echo -e "${GREEN}[3/5] Enabling Nuvoton TPM device tree overlay...${NC}"
     if grep -q "^dtoverlay=tpm-nuvoton" "$CONFIG_FILE"; then
         echo "  ✓ TPM overlay already enabled"
     elif grep -q "^#.*dtoverlay=tpm-nuvoton" "$CONFIG_FILE"; then
@@ -892,7 +949,7 @@ enable_tpm_hardware() {
     
     # Step 3: Ensure tpm_tis_spi kernel module loads at boot
     echo ""
-    echo -e "${GREEN}[4/4] Configuring TPM kernel module...${NC}"
+    echo -e "${GREEN}[4/5] Configuring TPM kernel module...${NC}"
     if grep -q "^tpm_tis_spi" /etc/modules 2>/dev/null; then
         echo "  ✓ tpm_tis_spi module already in /etc/modules"
     else
@@ -903,6 +960,11 @@ enable_tpm_hardware() {
     
     # Try loading the module now (may fail if overlay not yet active)
     modprobe tpm_tis_spi 2>/dev/null && echo "  ✓ tpm_tis_spi module loaded" || echo "  ℹ️  Module will load after reboot"
+    
+    # Step 5: Configure udev rules for IoT Edge TPM access
+    echo ""
+    echo -e "${GREEN}[5/5] Configuring IoT Edge TPM access (udev rules)...${NC}"
+    configure_tpm_udev_rules
     
     # Re-enable exit-on-error
     set -e
@@ -917,7 +979,8 @@ enable_tpm_hardware() {
         echo "After reboot:"
         echo "  1. Verify TPM is detected:  ls -la /dev/tpm*"
         echo "  2. Check kernel log:        sudo dmesg | grep -i tpm"
-        echo "  3. Extract TPM key:         Run this script → option 11"
+        echo "  3. Apply IoT Edge config:   sudo iotedge config apply"
+        echo "  4. Extract TPM key:         Run this script → option 11"
     else
         echo -e "${GREEN}✓ TPM hardware already configured${NC}"
         echo ""

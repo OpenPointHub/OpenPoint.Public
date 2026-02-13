@@ -125,12 +125,13 @@ The setup script provides an interactive menu with the following options:
 0. **Exit** - Exit the setup script
 
 12. **Enable TPM Hardware** - Enable Nuvoton NPCT750 TPM SPI overlay
-    - Detects boot config file (`/boot/firmware/config.txt` or `/boot/config.txt`)
-    - Enables SPI interface (`dtparam=spi=on`)
-    - Enables Nuvoton TPM device tree overlay (`dtoverlay=tpm-nuvoton`)
-    - Adds `tpm_tis_spi` kernel module to `/etc/modules`
-    - **Requires reboot** before TPM device (`/dev/tpm0`) becomes available
-    - Must be run before option 11 (Extract TPM Key) on Factor 201 boards
+- Detects boot config file (`/boot/firmware/config.txt` or `/boot/config.txt`)
+- Enables SPI interface (`dtparam=spi=on`)
+- Enables Nuvoton TPM device tree overlay (`dtoverlay=tpm-nuvoton`)
+- Adds `tpm_tis_spi` kernel module to `/etc/modules`
+- Configures udev rules (`/etc/udev/rules.d/tpmaccess.rules`) to grant IoT Edge (`aziottpm` group) access to `/dev/tpm0` and `/dev/tpmrm0`
+- **Requires reboot** before TPM device (`/dev/tpm0`) becomes available
+- Must be run before option 11 (Extract TPM Key) on Factor 201 boards
 
 ## 🔧 **Usage Examples**
 
