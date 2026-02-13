@@ -73,6 +73,7 @@ show_menu() {
     echo -e "  ${GREEN}9${NC}) Clean Duplicate Config - Remove duplicate entries from previous runs"
     echo -e "  ${GREEN}10${NC}) Configure Update Policy - Security-only, manual, or disable updates"
     echo -e "  ${GREEN}11${NC}) Extract TPM Key - Get TPM endorsement key for DPS enrollment"
+    echo -e "  ${GREEN}12${NC}) Enable TPM Hardware - Enable Nuvoton NPCT750 TPM SPI overlay (requires reboot)"
     echo ""
     echo -e "  ${YELLOW}0${NC}) Exit"
     echo ""
@@ -806,7 +807,8 @@ iotedge_runtime() {
         echo "  ✓ TPM device detected: $(ls /dev/tpm* 2>/dev/null | tr '\n' ' ')"
     else
         echo -e "${YELLOW}  ⚠ No TPM device found${NC}"
-        echo "  ℹ️  Will use connection string fallback for provisioning"
+        echo "  ℹ️  If this board has a Nuvoton NPCT750 TPM module, run option 12 to enable it."
+        echo "  ℹ️  Otherwise, will use connection string fallback for provisioning."
     fi
     
     # Re-enable exit-on-error
@@ -814,6 +816,122 @@ iotedge_runtime() {
     
     echo ""
     echo -e "${GREEN}✓ IoT Edge runtime ready${NC}"
+    return 0
+}
+
+# Enable Nuvoton NPCT750 TPM hardware on Factor 201
+enable_tpm_hardware() {
+    echo -e "${BLUE}[TPM HARDWARE ENABLEMENT]${NC}"
+    echo -e "${BLUE}  Nuvoton NPCT750 TPM 2.0 Module (SPI)${NC}"
+    echo ""
+    
+    # Temporarily disable exit-on-error for this function
+    set +e
+    
+    # Locate the boot config file
+    local CONFIG_FILE=""
+    if [ -f /boot/firmware/config.txt ]; then
+        CONFIG_FILE="/boot/firmware/config.txt"
+    elif [ -f /boot/config.txt ]; then
+        CONFIG_FILE="/boot/config.txt"
+    else
+        echo -e "${RED}✗ Boot config file not found!${NC}"
+        echo "  Checked: /boot/firmware/config.txt and /boot/config.txt"
+        set -e
+        return 1
+    fi
+    
+    echo -e "${GREEN}[1/4] Checking boot configuration...${NC}"
+    echo "  Config file: $CONFIG_FILE"
+    echo ""
+    
+    local CHANGES_MADE=0
+    
+    # Check if TPM is already detected
+    if [ -e /dev/tpm0 ] || [ -e /dev/tpmrm0 ]; then
+        echo -e "  ${GREEN}✓ TPM device already detected: $(ls /dev/tpm* 2>/dev/null | tr '\n' ' ')${NC}"
+        echo "  No changes needed. You can run option 11 to extract the TPM key."
+        echo ""
+        set -e
+        return 0
+    fi
+    
+    # Backup config file
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup-$(date +%s)"
+    echo "  ✓ Backed up config file"
+    
+    # Step 1: Enable SPI
+    echo ""
+    echo -e "${GREEN}[2/4] Enabling SPI interface...${NC}"
+    if grep -q "^dtparam=spi=on" "$CONFIG_FILE"; then
+        echo "  ✓ SPI already enabled"
+    elif grep -q "^#dtparam=spi=on" "$CONFIG_FILE"; then
+        sed -i 's/^#dtparam=spi=on/dtparam=spi=on/' "$CONFIG_FILE"
+        echo "  ✓ SPI enabled (uncommented)"
+        CHANGES_MADE=1
+    else
+        echo "dtparam=spi=on" >> "$CONFIG_FILE"
+        echo "  ✓ SPI enabled (added)"
+        CHANGES_MADE=1
+    fi
+    
+    # Step 2: Enable TPM overlay
+    echo ""
+    echo -e "${GREEN}[3/4] Enabling Nuvoton TPM device tree overlay...${NC}"
+    if grep -q "^dtoverlay=tpm-nuvoton" "$CONFIG_FILE"; then
+        echo "  ✓ TPM overlay already enabled"
+    elif grep -q "^#.*dtoverlay=tpm-nuvoton" "$CONFIG_FILE"; then
+        sed -i 's/^#.*dtoverlay=tpm-nuvoton/dtoverlay=tpm-nuvoton/' "$CONFIG_FILE"
+        echo "  ✓ TPM overlay enabled (uncommented)"
+        CHANGES_MADE=1
+    else
+        echo "dtoverlay=tpm-nuvoton" >> "$CONFIG_FILE"
+        echo "  ✓ TPM overlay added"
+        CHANGES_MADE=1
+    fi
+    
+    # Step 3: Ensure tpm_tis_spi kernel module loads at boot
+    echo ""
+    echo -e "${GREEN}[4/4] Configuring TPM kernel module...${NC}"
+    if grep -q "^tpm_tis_spi" /etc/modules 2>/dev/null; then
+        echo "  ✓ tpm_tis_spi module already in /etc/modules"
+    else
+        echo "tpm_tis_spi" >> /etc/modules
+        echo "  ✓ tpm_tis_spi module added to /etc/modules"
+        CHANGES_MADE=1
+    fi
+    
+    # Try loading the module now (may fail if overlay not yet active)
+    modprobe tpm_tis_spi 2>/dev/null && echo "  ✓ tpm_tis_spi module loaded" || echo "  ℹ️  Module will load after reboot"
+    
+    # Re-enable exit-on-error
+    set -e
+    
+    echo ""
+    if [ $CHANGES_MADE -eq 1 ]; then
+        echo -e "${GREEN}✓ TPM hardware configuration complete${NC}"
+        echo ""
+        echo -e "${YELLOW}⚠️  A reboot is REQUIRED for changes to take effect:${NC}"
+        echo "   sudo reboot"
+        echo ""
+        echo "After reboot:"
+        echo "  1. Verify TPM is detected:  ls -la /dev/tpm*"
+        echo "  2. Check kernel log:        sudo dmesg | grep -i tpm"
+        echo "  3. Extract TPM key:         Run this script → option 11"
+    else
+        echo -e "${GREEN}✓ TPM hardware already configured${NC}"
+        echo ""
+        echo -e "${YELLOW}⚠️  TPM overlay is configured but /dev/tpm0 not found.${NC}"
+        echo "  If you haven't rebooted since enabling, reboot now:"
+        echo "   sudo reboot"
+        echo ""
+        echo "  If you have rebooted, check:"
+        echo "   sudo dmesg | grep -i tpm    # Look for errors"
+        echo "   sudo dmesg | grep -i spi    # Check SPI bus"
+        echo "   cat $CONFIG_FILE | grep -i tpm"
+    fi
+    echo ""
+    
     return 0
 }
 
@@ -825,7 +943,15 @@ extract_tpm_key() {
     # Check if TPM is available
     if [ ! -e /dev/tpm0 ] && [ ! -e /dev/tpmrm0 ]; then
         echo -e "${RED}✗ No TPM device found!${NC}"
-        echo "  Please ensure TPM is enabled in BIOS/UEFI"
+        echo ""
+        echo "  The TPM device (/dev/tpm0) is not present. For Factor 201 boards"
+        echo "  with a Nuvoton NPCT750 TPM module, run option 12 first to enable"
+        echo "  the SPI TPM overlay, then reboot before running this option."
+        echo ""
+        echo "  Quick fix:"
+        echo "    1. Run this script → option 12 (Enable TPM Hardware)"
+        echo "    2. sudo reboot"
+        echo "    3. Run this script → option 11 (Extract TPM Key)"
         echo ""
         return 1
     fi
@@ -1835,6 +1961,8 @@ full_setup() {
     echo "   sudo reboot"
     echo ""
     echo "After reboot, run this script again and select:"
+    echo "   12. Enable TPM Hardware - Enable the Nuvoton NPCT750 TPM overlay"
+    echo "       (then reboot again, and run option 11 to extract the key)"
     echo "   11. Extract TPM Key - Get registration ID and endorsement key"
     echo ""
     echo "To view container logs:"
@@ -1899,6 +2027,10 @@ main() {
                 ;;
             11)
                 extract_tpm_key
+                read -p "Press ENTER to return to menu..." dummy
+                ;;
+            12)
+                enable_tpm_hardware
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             0)

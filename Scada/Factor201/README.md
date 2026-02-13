@@ -124,6 +124,14 @@ The setup script provides an interactive menu with the following options:
 
 0. **Exit** - Exit the setup script
 
+12. **Enable TPM Hardware** - Enable Nuvoton NPCT750 TPM SPI overlay
+    - Detects boot config file (`/boot/firmware/config.txt` or `/boot/config.txt`)
+    - Enables SPI interface (`dtparam=spi=on`)
+    - Enables Nuvoton TPM device tree overlay (`dtoverlay=tpm-nuvoton`)
+    - Adds `tpm_tis_spi` kernel module to `/etc/modules`
+    - **Requires reboot** before TPM device (`/dev/tpm0`) becomes available
+    - Must be run before option 11 (Extract TPM Key) on Factor 201 boards
+
 ## 🔧 **Usage Examples**
 
 ### **First-Time Setup**
@@ -134,10 +142,16 @@ sudo bash ./setup-iot-edge-device.sh
 sudo reboot
 ```
 
-### **After Reboot - Extract TPM Key**
+### **After Reboot - Enable TPM & Extract Key**
 ```bash
 sudo bash ./setup-iot-edge-device.sh
-# Choose option 7 (Extract TPM Key)
+# Choose option 12 (Enable TPM Hardware)
+# This enables the Nuvoton NPCT750 SPI overlay
+sudo reboot
+
+# After second reboot:
+sudo bash ./setup-iot-edge-device.sh
+# Choose option 11 (Extract TPM Key)
 # Copy Registration ID and Endorsement Key
 # Send to Azure administrator
 ```
