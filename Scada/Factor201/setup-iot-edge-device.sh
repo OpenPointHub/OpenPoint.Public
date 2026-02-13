@@ -935,6 +935,26 @@ enable_tpm_hardware() {
     # Step 2: Enable TPM overlay
     echo ""
     echo -e "${GREEN}[3/5] Enabling Nuvoton TPM device tree overlay...${NC}"
+    
+    # Disable conflicting TPM overlays (only one TPM overlay can be active on the SPI bus)
+    # The Factor 201 uses Nuvoton NPCT750 - other TPM overlays will conflict and prevent detection
+    local CONFLICTING_OVERLAYS=("tpm-slb9670" "tpm-slb9670-spi")
+    for overlay in "${CONFLICTING_OVERLAYS[@]}"; do
+        if grep -q "^dtoverlay=$overlay" "$CONFIG_FILE"; then
+            sed -i "s/^dtoverlay=$overlay/#dtoverlay=$overlay  # disabled - conflicts with tpm-nuvoton/" "$CONFIG_FILE"
+            echo -e "  ${YELLOW}⚠ Disabled conflicting overlay: dtoverlay=$overlay${NC}"
+            echo "    Only one TPM overlay can be active on the SPI bus"
+            CHANGES_MADE=1
+        fi
+        # Also catch manufacturer typo: "dtoverly" instead of "dtoverlay"
+        if grep -q "^dtoverly=$overlay" "$CONFIG_FILE"; then
+            sed -i "s/^dtoverly=$overlay/#dtoverly=$overlay  # disabled - typo and conflicts with tpm-nuvoton/" "$CONFIG_FILE"
+            echo -e "  ${YELLOW}⚠ Disabled conflicting overlay with typo: dtoverly=$overlay${NC}"
+            echo "    (manufacturer typo: 'dtoverly' should be 'dtoverlay')"
+            CHANGES_MADE=1
+        fi
+    done
+    
     if grep -q "^dtoverlay=tpm-nuvoton" "$CONFIG_FILE"; then
         echo "  ✓ TPM overlay already enabled"
     elif grep -q "^#.*dtoverlay=tpm-nuvoton" "$CONFIG_FILE"; then
@@ -992,6 +1012,9 @@ enable_tpm_hardware() {
         echo "   sudo dmesg | grep -i tpm    # Look for errors"
         echo "   sudo dmesg | grep -i spi    # Check SPI bus"
         echo "   cat $CONFIG_FILE | grep -i tpm"
+        echo ""
+        echo "  Common issue: Multiple TPM overlays active (e.g., tpm-slb9670 + tpm-nuvoton)."
+        echo "  Only one can be active. Run option 12 again to auto-fix conflicts."
     fi
     echo ""
     
