@@ -74,6 +74,7 @@ show_menu() {
     echo -e "  ${GREEN}10${NC}) Configure Update Policy - Security-only, manual, or disable updates"
     echo -e "  ${GREEN}11${NC}) Extract TPM Key - Get TPM endorsement key for DPS enrollment"
     echo -e "  ${GREEN}12${NC}) Enable TPM Hardware - Enable Nuvoton NPCT750 TPM SPI overlay (requires reboot)"
+    echo -e "  ${GREEN}13${NC}) ${YELLOW}Repair IoT Edge${NC} - Purge and clean reinstall (fixes broken installs)"
     echo ""
     echo -e "  ${YELLOW}0${NC}) Exit"
     echo ""
@@ -774,6 +775,58 @@ iotedge_runtime() {
         fi
     fi
     
+    # Verify critical directories exist (catches broken/partial installs)
+    # iotedge config apply writes to /etc/aziot/edged/config.d/00-super.toml
+    # If these directories are missing, config apply will fail silently and
+    # iotedge list will stall indefinitely because services can't start
+    echo ""
+    echo "  Verifying IoT Edge directories..."
+    local DIRS_OK=1
+    for dir in /etc/aziot /etc/aziot/edged/config.d /etc/aziot/keyd/config.d /etc/aziot/certd/config.d /etc/aziot/identityd/config.d; do
+        if [ ! -d "$dir" ]; then
+            echo -e "${RED}  ✗ Missing directory: $dir${NC}"
+            mkdir -p "$dir"
+            echo -e "${GREEN}  ✓ Created: $dir${NC}"
+            DIRS_OK=0
+        fi
+    done
+    
+    if [ $DIRS_OK -eq 1 ]; then
+        echo "  ✓ All IoT Edge directories present"
+    else
+        echo -e "${YELLOW}  ⚠ Missing directories were created — package may have installed incompletely${NC}"
+        echo "  If problems persist, run a clean reinstall:"
+        echo "    sudo apt-get purge -y aziot-edge aziot-identity-service"
+        echo "    sudo rm -rf /etc/aziot /var/lib/aziot /var/secrets/aziot"
+        echo "    sudo apt-get install -y aziot-edge"
+    fi
+    
+    # Verify aziot-identity-service is installed (required dependency)
+    if ! systemctl list-unit-files aziot-identityd.service &>/dev/null; then
+        echo -e "${RED}  ✗ aziot-identityd service not found — aziot-identity-service package missing${NC}"
+        echo "  Attempting to install..."
+        apt-get install -y aziot-identity-service 2>&1 | tail -5
+        if systemctl list-unit-files aziot-identityd.service &>/dev/null; then
+            echo -e "${GREEN}  ✓ aziot-identity-service installed${NC}"
+        else
+            echo -e "${RED}  ✗ Failed — run a clean reinstall:${NC}"
+            echo "    sudo apt-get purge -y aziot-edge aziot-identity-service"
+            echo "    sudo rm -rf /etc/aziot /var/lib/aziot /var/secrets/aziot"
+            echo "    sudo apt-get install -y aziot-edge"
+        fi
+    else
+        echo "  ✓ aziot-identityd service available"
+    fi
+    
+    # Ensure config template exists for provisioning
+    if [ -f /etc/aziot/config.toml.edge.template ] && [ ! -f /etc/aziot/config.toml ]; then
+        echo ""
+        echo -e "${CYAN}  ℹ️  Config template available. To provision this device:${NC}"
+        echo "    sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
+        echo "    sudo nano /etc/aziot/config.toml  # Add your DPS/connection string"
+        echo "    sudo iotedge config apply"
+    fi
+    
     # Install TPM tools
     echo ""
     echo -e "${GREEN}[2/2] Installing TPM 2.0 tools...${NC}"
@@ -1142,8 +1195,12 @@ persist_iot_edge_storage() {
     mkdir -p /var/lib/iotedge/edgeAgent
     mkdir -p /var/lib/iotedge/edgeHub
     
-    # Set proper permissions
-    chown -R iotedge:iotedge /var/lib/iotedge 2>/dev/null || true
+    # Set proper permissions (iotedge user/group created by aziot-edge package)
+    if getent passwd iotedge &>/dev/null; then
+        chown -R iotedge:iotedge /var/lib/iotedge
+    else
+        echo -e "  ${YELLOW}⚠ User 'iotedge' not found — install IoT Edge first (option 6)${NC}"
+    fi
     chmod -R 755 /var/lib/iotedge
     
     echo "  ✓ Created: /var/lib/iotedge/edgeAgent"
@@ -1153,14 +1210,28 @@ persist_iot_edge_storage() {
     echo ""
     echo -e "${GREEN}[2/3] Configuring IoT Edge environment variables...${NC}"
     
-    # This will be used by the deployment manifest to configure volume mounts
-    cat > /etc/systemd/system/iotedge.service.d/persistent-storage.conf <<'EOF'
+    # Modern aziot-edge uses aziot-edged.service (not iotedge.service)
+    local SERVICE_NAME=""
+    if systemctl list-unit-files aziot-edged.service &>/dev/null; then
+        SERVICE_NAME="aziot-edged"
+    elif systemctl list-unit-files iotedge.service &>/dev/null; then
+        SERVICE_NAME="iotedge"
+    else
+        echo -e "  ${YELLOW}⚠ IoT Edge service not found — install IoT Edge first (option 6)${NC}"
+        echo "    Persistent storage directories are ready. Re-run this after installing IoT Edge."
+        set -e
+        return 0
+    fi
+    
+    # Create the drop-in directory and config
+    mkdir -p /etc/systemd/system/${SERVICE_NAME}.service.d
+    cat > /etc/systemd/system/${SERVICE_NAME}.service.d/persistent-storage.conf <<'EOF'
 [Service]
 Environment="EDGEAGENT_STORAGE_PATH=/var/lib/iotedge/edgeAgent"
 Environment="EDGEHUB_STORAGE_PATH=/var/lib/iotedge/edgeHub"
 EOF
     
-    echo "  ✓ Created systemd drop-in configuration"
+    echo "  ✓ Created systemd drop-in for ${SERVICE_NAME}.service"
     
     # Reload systemd to pick up changes
     echo ""
@@ -1925,6 +1996,199 @@ EOF
     esac
 }
 
+# Repair IoT Edge - purge and clean reinstall
+repair_iotedge() {
+    echo -e "${BLUE}[REPAIR IoT EDGE]${NC}"
+    echo -e "${BLUE}  Purge and Clean Reinstall${NC}"
+    echo ""
+    
+    # Temporarily disable exit-on-error for this function
+    set +e
+    
+    echo -e "${RED}═══════════════════════════════════════════${NC}"
+    echo -e "${RED}│  WARNING: DESTRUCTIVE OPERATION           │${NC}"
+    echo -e "${RED}═══════════════════════════════════════════${NC}"
+    echo ""
+    echo "This will:"
+    echo "  • Stop all Azure IoT Edge services"
+    echo "  • Purge aziot-edge and aziot-identity-service packages"
+    echo "  • Delete ALL IoT Edge configuration (/etc/aziot)"
+    echo "  • Delete ALL IoT Edge state (/var/lib/aziot, /var/secrets/aziot)"
+    echo "  • Remove systemd drop-in overrides"
+    echo "  • Reinstall aziot-edge from scratch"
+    echo ""
+    echo -e "${YELLOW}⚠️  You will need to re-provision the device after reinstall.${NC}"
+    echo -e "${YELLOW}   Have your DPS scope ID, registration ID, and symmetric key ready.${NC}"
+    echo ""
+    read -p "Type 'REPAIR' to confirm, or anything else to cancel: " CONFIRM
+    echo ""
+    
+    if [ "$CONFIRM" != "REPAIR" ]; then
+        echo "Cancelled."
+        set -e
+        return 0
+    fi
+    
+    # Step 1: Stop all aziot services
+    echo -e "${GREEN}[1/6] Stopping IoT Edge services...${NC}"
+    local SERVICES=("aziot-edged" "aziot-identityd" "aziot-keyd" "aziot-certd" "aziot-tpmd")
+    for svc in "${SERVICES[@]}"; do
+        if systemctl is-active --quiet "${svc}.service" 2>/dev/null; then
+            systemctl stop "${svc}.service" 2>/dev/null
+            echo "  ✓ Stopped ${svc}"
+        else
+            echo "  · ${svc} not running"
+        fi
+    done
+    # Also stop legacy service name if present
+    systemctl stop iotedge.service 2>/dev/null || true
+    echo ""
+    
+    # Step 2: Purge packages
+    echo -e "${GREEN}[2/6] Purging IoT Edge packages...${NC}"
+    
+    wait_for_package_manager
+    if [ $? -ne 0 ]; then
+        set -e
+        return 1
+    fi
+    
+    apt-get purge -y aziot-edge 2>&1 | tail -5
+    apt-get purge -y aziot-identity-service 2>&1 | tail -5
+    echo "  ✓ Packages purged"
+    echo ""
+    
+    # Step 3: Remove all config and state directories
+    echo -e "${GREEN}[3/6] Removing configuration and state...${NC}"
+    rm -rf /etc/aziot
+    echo "  ✓ Removed /etc/aziot"
+    rm -rf /var/lib/aziot
+    echo "  ✓ Removed /var/lib/aziot"
+    rm -rf /var/secrets/aziot
+    echo "  ✓ Removed /var/secrets/aziot"
+    echo ""
+    
+    # Step 4: Clean up systemd drop-ins
+    echo -e "${GREEN}[4/6] Cleaning systemd overrides...${NC}"
+    if [ -d /etc/systemd/system/aziot-edged.service.d ]; then
+        rm -rf /etc/systemd/system/aziot-edged.service.d
+        echo "  ✓ Removed aziot-edged.service.d drop-in"
+    fi
+    if [ -d /etc/systemd/system/iotedge.service.d ]; then
+        rm -rf /etc/systemd/system/iotedge.service.d
+        echo "  ✓ Removed iotedge.service.d drop-in (legacy)"
+    fi
+    systemctl daemon-reload
+    
+    apt-get autoremove -y 2>&1 | tail -3
+    echo "  ✓ Cleaned up dependencies"
+    echo ""
+    
+    # Step 5: Reinstall
+    echo -e "${GREEN}[5/6] Reinstalling Azure IoT Edge...${NC}"
+    
+    wait_for_package_manager
+    if [ $? -ne 0 ]; then
+        set -e
+        return 1
+    fi
+    
+    echo "  Updating package lists..."
+    apt-get update --fix-missing 2>&1 | tail -5
+    
+    echo "  Installing aziot-edge (this may take a few minutes)..."
+    apt-get install -y aziot-edge 2>&1 | tee /tmp/iotedge-repair.log | tail -15
+    local install_result=$?
+    
+    if [ $install_result -ne 0 ]; then
+        echo ""
+        echo -e "${RED}✗ Failed to reinstall aziot-edge (exit code: $install_result)${NC}"
+        echo "  Check log: /tmp/iotedge-repair.log"
+        set -e
+        return 1
+    fi
+    echo "  ✓ aziot-edge installed"
+    echo ""
+    
+    # Step 6: Verify installation
+    echo -e "${GREEN}[6/6] Verifying installation...${NC}"
+    
+    # Check command
+    if command -v iotedge &>/dev/null; then
+        echo "  ✓ iotedge command available: $(iotedge --version 2>/dev/null || echo 'unknown')"
+    else
+        echo -e "  ${RED}✗ iotedge command not found${NC}"
+        set -e
+        return 1
+    fi
+    
+    # Check critical directories
+    local ALL_DIRS_OK=1
+    for dir in /etc/aziot /etc/aziot/edged/config.d /etc/aziot/keyd/config.d /etc/aziot/certd/config.d /etc/aziot/identityd/config.d; do
+        if [ -d "$dir" ]; then
+            echo "  ✓ $dir"
+        else
+            echo -e "  ${RED}✗ Missing: $dir${NC}"
+            mkdir -p "$dir"
+            echo -e "  ${GREEN}  → Created${NC}"
+            ALL_DIRS_OK=0
+        fi
+    done
+    
+    # Check aziot-identityd service
+    if systemctl list-unit-files aziot-identityd.service &>/dev/null; then
+        echo "  ✓ aziot-identityd service available"
+    else
+        echo -e "  ${RED}✗ aziot-identityd service missing${NC}"
+        echo "  Attempting to install aziot-identity-service..."
+        apt-get install -y aziot-identity-service 2>&1 | tail -5
+    fi
+    
+    # Re-enable exit-on-error
+    set -e
+    
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}│  IoT Edge REPAIR COMPLETE                  │${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${CYAN}Next steps to provision the device:${NC}"
+    echo ""
+    echo "  1. Copy the config template:"
+    echo "     sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
+    echo ""
+    echo "  2. Edit the config with your provisioning details:"
+    echo "     sudo nano /etc/aziot/config.toml"
+    echo ""
+    echo "     For DPS symmetric key provisioning, set:"
+    echo '       [provisioning]'
+    echo '       source = "dps"'
+    echo '       [provisioning.attestation]'
+    echo '       method = "symmetric_key"'
+    echo '       registration_id = "<your-registration-id>"'
+    echo '       symmetric_key = { value = "<your-symmetric-key>" }'
+    echo '       [provisioning.attestation.dps]'
+    echo '       global_endpoint = "https://global.azure-devices-provisioning.net"'
+    echo '       id_scope = "<your-id-scope>"'
+    echo ""
+    echo "  3. Apply the configuration:"
+    echo "     sudo iotedge config apply"
+    echo ""
+    echo "  4. Verify it's working:"
+    echo "     sudo iotedge system status"
+    echo "     sudo iotedge list"
+    echo ""
+    
+    # Re-run persistent storage setup if directories exist
+    if [ -d /var/lib/iotedge ]; then
+        echo -e "${CYAN}ℹ️  Persistent storage directories (/var/lib/iotedge) still exist.${NC}"
+        echo "  Run option 7 after provisioning to re-apply the systemd drop-in."
+        echo ""
+    fi
+    
+    return 0
+}
+
 # Full setup
 full_setup() {
     echo -e "${CYAN}════════════════════════════════════════════${NC}"
@@ -2124,6 +2388,10 @@ main() {
                 ;;
             12)
                 enable_tpm_hardware
+                read -p "Press ENTER to return to menu..." dummy
+                ;;
+            13)
+                repair_iotedge
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             0)
