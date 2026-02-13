@@ -2012,6 +2012,7 @@ repair_iotedge() {
     echo "This will:"
     echo "  • Stop all Azure IoT Edge services"
     echo "  • Purge aziot-edge and aziot-identity-service packages"
+    echo "  • Remove orphaned Docker containers (edgeAgent, edgeHub, modules)"
     echo "  • Delete ALL IoT Edge configuration (/etc/aziot)"
     echo "  • Delete ALL IoT Edge state (/var/lib/aziot, /var/secrets/aziot)"
     echo "  • Remove systemd drop-in overrides"
@@ -2030,7 +2031,7 @@ repair_iotedge() {
     fi
     
     # Step 1: Stop all aziot services
-    echo -e "${GREEN}[1/6] Stopping IoT Edge services...${NC}"
+    echo -e "${GREEN}[1/7] Stopping IoT Edge services...${NC}"
     local SERVICES=("aziot-edged" "aziot-identityd" "aziot-keyd" "aziot-certd" "aziot-tpmd")
     for svc in "${SERVICES[@]}"; do
         if systemctl is-active --quiet "${svc}.service" 2>/dev/null; then
@@ -2045,7 +2046,7 @@ repair_iotedge() {
     echo ""
     
     # Step 2: Purge packages
-    echo -e "${GREEN}[2/6] Purging IoT Edge packages...${NC}"
+    echo -e "${GREEN}[2/7] Purging IoT Edge packages...${NC}"
     
     wait_for_package_manager
     if [ $? -ne 0 ]; then
@@ -2058,8 +2059,33 @@ repair_iotedge() {
     echo "  ✓ Packages purged"
     echo ""
     
-    # Step 3: Remove all config and state directories
-    echo -e "${GREEN}[3/6] Removing configuration and state...${NC}"
+    # Step 3: Remove all Docker containers and IoT Edge network
+    # On dedicated IoT Edge devices, all containers are managed by IoT Edge
+    # (edgeAgent, edgeHub, ScadaPollingModule, etc.) — safe to remove everything
+    echo -e "${GREEN}[3/7] Removing all Docker containers...${NC}"
+    if command -v docker &>/dev/null && systemctl is-active --quiet docker 2>/dev/null; then
+        local ALL_CONTAINERS=$(docker ps -a --format "{{.Names}}" 2>/dev/null)
+        if [ -n "$ALL_CONTAINERS" ]; then
+            echo "$ALL_CONTAINERS" | while read -r cname; do
+                docker rm -f "$cname" 2>/dev/null && echo "  ✓ Removed container: $cname" || echo "  · Could not remove: $cname"
+            done
+        else
+            echo "  · No containers found"
+        fi
+        
+        # Remove the IoT Edge Docker network
+        if docker network ls --format "{{.Name}}" 2>/dev/null | grep -qx "azure-iot-edge"; then
+            docker network rm azure-iot-edge 2>/dev/null && echo "  ✓ Removed network: azure-iot-edge" || echo "  · Could not remove network azure-iot-edge"
+        fi
+        
+        echo "  ✓ Docker cleanup complete"
+    else
+        echo "  · Docker not running, skipping container cleanup"
+    fi
+    echo ""
+    
+    # Step 4: Remove all config and state directories
+    echo -e "${GREEN}[4/7] Removing configuration and state...${NC}"
     rm -rf /etc/aziot
     echo "  ✓ Removed /etc/aziot"
     rm -rf /var/lib/aziot
@@ -2068,8 +2094,8 @@ repair_iotedge() {
     echo "  ✓ Removed /var/secrets/aziot"
     echo ""
     
-    # Step 4: Clean up systemd drop-ins
-    echo -e "${GREEN}[4/6] Cleaning systemd overrides...${NC}"
+    # Step 5: Clean up systemd drop-ins
+    echo -e "${GREEN}[5/7] Cleaning systemd overrides...${NC}"
     if [ -d /etc/systemd/system/aziot-edged.service.d ]; then
         rm -rf /etc/systemd/system/aziot-edged.service.d
         echo "  ✓ Removed aziot-edged.service.d drop-in"
@@ -2084,8 +2110,8 @@ repair_iotedge() {
     echo "  ✓ Cleaned up dependencies"
     echo ""
     
-    # Step 5: Reinstall
-    echo -e "${GREEN}[5/6] Reinstalling Azure IoT Edge...${NC}"
+    # Step 6: Reinstall
+    echo -e "${GREEN}[6/7] Reinstalling Azure IoT Edge...${NC}"
     
     wait_for_package_manager
     if [ $? -ne 0 ]; then
@@ -2110,8 +2136,8 @@ repair_iotedge() {
     echo "  ✓ aziot-edge installed"
     echo ""
     
-    # Step 6: Verify installation
-    echo -e "${GREEN}[6/6] Verifying installation...${NC}"
+    # Step 7: Verify installation
+    echo -e "${GREEN}[7/7] Verifying installation...${NC}"
     
     # Check command
     if command -v iotedge &>/dev/null; then
@@ -2153,6 +2179,12 @@ repair_iotedge() {
     echo -e "${GREEN}════════════════════════════════════════════${NC}"
     echo ""
     echo -e "${CYAN}Next steps to provision the device:${NC}"
+    echo ""
+    echo -e "  ${YELLOW}0. If re-provisioning with a DIFFERENT enrollment:${NC}"
+    echo "     Delete the old DPS registration in Azure Portal:"
+    echo "       DPS → Manage enrollments → Individual → select old enrollment → Delete registration"
+    echo "     Or delete the old device identity in IoT Hub:"
+    echo "       IoT Hub → Devices → select old device → Delete"
     echo ""
     echo "  1. Copy the config template:"
     echo "     sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
