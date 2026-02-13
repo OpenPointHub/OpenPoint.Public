@@ -370,10 +370,44 @@ configure_ssh_access() {
     # Load existing config
     load_config
     
+    # Show existing SSH rules if any
+    if command -v ufw &> /dev/null; then
+        EXISTING_SSH=$(ufw status 2>/dev/null | grep "22/tcp" || true)
+        if [ -n "$EXISTING_SSH" ]; then
+            echo -e "${CYAN}Current SSH rules:${NC}"
+            echo "$EXISTING_SSH" | sed 's/^/  /'
+            echo ""
+            echo "  New rules will be added alongside existing ones."
+            echo "  Exact duplicates are automatically skipped."
+            echo ""
+        fi
+    fi
+    
+    # Detect device IP and suggest local network
+    local DETECTED_SUBNET=""
+    local DEVICE_IP=""
+    local PRIMARY_IFACE=""
+    PRIMARY_IFACE=$(ip route 2>/dev/null | grep default | awk '{print $5}' | head -1)
+    if [ -n "$PRIMARY_IFACE" ]; then
+        DEVICE_IP=$(ip -4 addr show "$PRIMARY_IFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+        if [ -n "$DEVICE_IP" ]; then
+            DETECTED_SUBNET="${DEVICE_IP%.*}.0/24"
+            echo -e "${CYAN}Detected network interface:${NC}"
+            echo -e "  Interface: ${GREEN}$PRIMARY_IFACE${NC}"
+            echo -e "  Device IP: ${GREEN}$DEVICE_IP${NC}"
+            echo -e "  Local network: ${GREEN}$DETECTED_SUBNET${NC}"
+            echo ""
+        fi
+    fi
+    
     echo "SSH access can be configured in two ways:"
     echo ""
     echo "  1) Allow from specific management network (RECOMMENDED)"
-    echo "     Example: 192.168.1.0/24"
+    if [ -n "$DETECTED_SUBNET" ]; then
+        echo "     Suggested: $DETECTED_SUBNET"
+    else
+        echo "     Example: 192.168.1.0/24"
+    fi
     echo ""
     echo "  2) Allow from anywhere (NOT RECOMMENDED)"
     echo "     Use only for testing or if VPN is configured"
@@ -383,11 +417,13 @@ configure_ssh_access() {
     
     case $SSH_OPTION in
         1)
-            if [ -z "$MGMT_NETWORK" ]; then
-                read -p "Enter management network (e.g., 192.168.1.0/24): " MGMT_NETWORK
+            # Use saved config, then detected subnet, then prompt with no default
+            local DEFAULT_NETWORK="${MGMT_NETWORK:-$DETECTED_SUBNET}"
+            if [ -n "$DEFAULT_NETWORK" ]; then
+                read -p "Enter management network [$DEFAULT_NETWORK]: " NEW_MGMT_NETWORK
+                MGMT_NETWORK=${NEW_MGMT_NETWORK:-$DEFAULT_NETWORK}
             else
-                read -p "Enter management network [$MGMT_NETWORK]: " NEW_MGMT_NETWORK
-                MGMT_NETWORK=${NEW_MGMT_NETWORK:-$MGMT_NETWORK}
+                read -p "Enter management network (e.g., 192.168.1.0/24): " MGMT_NETWORK
             fi
             
             # Validate network
