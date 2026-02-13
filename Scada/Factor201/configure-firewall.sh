@@ -76,11 +76,24 @@ install_ufw() {
 # Detect active SSH session and automatically add firewall rule to protect it
 # Returns 0 if SSH rule was added, 1 if no SSH session detected
 protect_ssh_session() {
-    # Check for active SSH session via environment variable
+    local SSH_CLIENT_IP=""
+
+    # Method 1: Check SSH_CONNECTION env var (works with sudo -E)
     if [ -n "$SSH_CONNECTION" ]; then
-        local SSH_CLIENT_IP
         SSH_CLIENT_IP=$(echo "$SSH_CONNECTION" | awk '{print $1}')
-        
+    fi
+
+    # Method 2: Fall back to 'who am i' (works through sudo)
+    if [ -z "$SSH_CLIENT_IP" ]; then
+        SSH_CLIENT_IP=$(who am i 2>/dev/null | grep -oP '\(\K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(?=\))' | head -1)
+    fi
+
+    # Method 3: Fall back to ss (find established SSH connections)
+    if [ -z "$SSH_CLIENT_IP" ]; then
+        SSH_CLIENT_IP=$(ss -tnp 2>/dev/null | grep ":22 " | grep ESTAB | awk '{print $5}' | grep -oP '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    fi
+
+    if [ -n "$SSH_CLIENT_IP" ]; then
         echo -e "  ${YELLOW}SSH session detected from ${CYAN}$SSH_CLIENT_IP${NC}"
         echo "  Automatically adding SSH rule to prevent lockout..."
         
