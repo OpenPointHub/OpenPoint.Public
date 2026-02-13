@@ -75,6 +75,7 @@ show_menu() {
     echo -e "  ${GREEN}11${NC}) Extract TPM Key - Get TPM endorsement key for DPS enrollment"
     echo -e "  ${GREEN}12${NC}) Enable TPM Hardware - Enable Nuvoton NPCT750 TPM SPI overlay (requires reboot)"
     echo -e "  ${GREEN}13${NC}) ${YELLOW}Repair IoT Edge${NC} - Purge and clean reinstall (fixes broken installs)"
+    echo -e "  ${GREEN}14${NC}) ${CYAN}Pre-Provision Health Check${NC} - Verify install is clean before connecting to Azure"
     echo ""
     echo -e "  ${YELLOW}0${NC}) Exit"
     echo ""
@@ -2203,10 +2204,12 @@ repair_iotedge() {
     echo '       global_endpoint = "https://global.azure-devices-provisioning.net"'
     echo '       id_scope = "<your-id-scope>"'
     echo ""
-    echo "  3. Apply the configuration:"
+    echo "  3. Run the health check (option 14) to confirm the install is clean"
+    echo ""
+    echo "  4. Only if ALL checks pass, apply the configuration:"
     echo "     sudo iotedge config apply"
     echo ""
-    echo "  4. Verify it's working:"
+    echo "  5. Verify it's working:"
     echo "     sudo iotedge system status"
     echo "     sudo iotedge list"
     echo ""
@@ -2218,7 +2221,267 @@ repair_iotedge() {
         echo ""
     fi
     
+    # Auto-run health check after repair
+    echo ""
+    read -p "Run pre-provision health check now? (Y/n): " RUN_CHECK
+    echo ""
+    if [[ ! $RUN_CHECK =~ ^[Nn]$ ]]; then
+        verify_iotedge_health
+    fi
+    
     return 0
+}
+
+# Pre-provisioning health check
+# Validates the IoT Edge installation is clean and ready BEFORE connecting to Azure.
+# This prevents a broken install from contacting DPS and corrupting Azure state.
+verify_iotedge_health() {
+    echo -e "${BLUE}[PRE-PROVISION HEALTH CHECK]${NC}"
+    echo -e "${BLUE}  Verify IoT Edge is ready before connecting to Azure${NC}"
+    echo ""
+    echo -e "${CYAN}This check runs entirely LOCAL — no Azure contact is made.${NC}"
+    echo -e "${CYAN}All checks must pass before you provision the device.${NC}"
+    echo ""
+    
+    local PASS=0
+    local FAIL=0
+    local WARN=0
+    
+    pass() { echo -e "  ${GREEN}✓ PASS${NC} — $1"; PASS=$((PASS + 1)); }
+    fail() { echo -e "  ${RED}✗ FAIL${NC} — $1"; FAIL=$((FAIL + 1)); }
+    warn() { echo -e "  ${YELLOW}⚠ WARN${NC} — $1"; WARN=$((WARN + 1)); }
+    
+    # ── 1. Package integrity ──────────────────────────────────────────────
+    echo -e "${GREEN}[1/8] Package integrity...${NC}"
+    
+    # Check aziot-edge package is fully installed (not half-configured)
+    local EDGE_STATUS=$(dpkg -l aziot-edge 2>/dev/null | grep "^ii" | awk '{print $3}')
+    if [ -n "$EDGE_STATUS" ]; then
+        pass "aziot-edge package installed (${EDGE_STATUS})"
+    else
+        # Check for broken/half-configured state
+        local EDGE_BROKEN=$(dpkg -l aziot-edge 2>/dev/null | grep -E "^(iF|iU|iH|rc)")
+        if [ -n "$EDGE_BROKEN" ]; then
+            fail "aziot-edge package is BROKEN ($(echo $EDGE_BROKEN | awk '{print $1}') state)"
+            echo "         Run option 13 (Repair) to fix"
+        else
+            fail "aziot-edge package not installed"
+        fi
+    fi
+    
+    local IDS_STATUS=$(dpkg -l aziot-identity-service 2>/dev/null | grep "^ii" | awk '{print $3}')
+    if [ -n "$IDS_STATUS" ]; then
+        pass "aziot-identity-service package installed (${IDS_STATUS})"
+    else
+        local IDS_BROKEN=$(dpkg -l aziot-identity-service 2>/dev/null | grep -E "^(iF|iU|iH|rc)")
+        if [ -n "$IDS_BROKEN" ]; then
+            fail "aziot-identity-service package is BROKEN"
+        else
+            fail "aziot-identity-service package not installed"
+        fi
+    fi
+    echo ""
+    
+    # ── 2. Critical binaries ──────────────────────────────────────────────
+    echo -e "${GREEN}[2/8] Critical binaries...${NC}"
+    
+    for bin in iotedge aziot-edged aziot-identityd aziot-keyd aziot-certd; do
+        if command -v "$bin" &>/dev/null; then
+            pass "$bin found at $(which $bin)"
+        else
+            fail "$bin binary not found"
+        fi
+    done
+    echo ""
+    
+    # ── 3. Critical directories ───────────────────────────────────────────
+    echo -e "${GREEN}[3/8] Critical directories...${NC}"
+    
+    for dir in /etc/aziot /etc/aziot/edged/config.d /etc/aziot/keyd/config.d /etc/aziot/certd/config.d /etc/aziot/identityd/config.d; do
+        if [ -d "$dir" ]; then
+            pass "$dir exists"
+        else
+            fail "$dir missing"
+        fi
+    done
+    echo ""
+    
+    # ── 4. Config template ────────────────────────────────────────────────
+    echo -e "${GREEN}[4/8] Configuration state...${NC}"
+    
+    if [ -f /etc/aziot/config.toml.edge.template ]; then
+        pass "Config template exists (/etc/aziot/config.toml.edge.template)"
+    else
+        fail "Config template missing — package may be corrupt"
+    fi
+    
+    # config.toml should NOT exist yet (repair deletes it, user creates it during provisioning)
+    if [ -f /etc/aziot/config.toml ]; then
+        warn "config.toml already exists — leftover from previous provisioning?"
+        echo "         If re-provisioning, delete it first: sudo rm /etc/aziot/config.toml"
+    else
+        pass "No leftover config.toml (clean state)"
+    fi
+    echo ""
+    
+    # ── 5. Systemd unit files ─────────────────────────────────────────────
+    echo -e "${GREEN}[5/8] Systemd services...${NC}"
+    
+    for svc in aziot-edged aziot-identityd aziot-keyd aziot-certd; do
+        if systemctl list-unit-files "${svc}.service" &>/dev/null 2>&1; then
+            pass "${svc}.service unit file registered"
+        else
+            fail "${svc}.service unit file missing"
+        fi
+    done
+    
+    # Services should NOT be running before provisioning
+    # If aziot-identityd is running without a valid config, it will attempt DPS contact
+    local RUNNING_SERVICES=""
+    for svc in aziot-edged aziot-identityd aziot-keyd aziot-certd aziot-tpmd; do
+        if systemctl is-active --quiet "${svc}.service" 2>/dev/null; then
+            RUNNING_SERVICES+="$svc "
+        fi
+    done
+    if [ -n "$RUNNING_SERVICES" ]; then
+        fail "Azure IoT services are RUNNING before provisioning: ${RUNNING_SERVICES}"
+        echo "         This means the device may be contacting Azure RIGHT NOW"
+        echo "         Stop them: sudo systemctl stop aziot-edged aziot-identityd aziot-keyd aziot-certd"
+    else
+        pass "No Azure IoT services running (safe — not contacting Azure)"
+    fi
+    echo ""
+    
+    # ── 6. Docker engine ──────────────────────────────────────────────────
+    echo -e "${GREEN}[6/8] Docker engine...${NC}"
+    
+    if command -v docker &>/dev/null; then
+        pass "Docker binary found"
+    else
+        fail "Docker binary not found — run option 5 (Container Engine)"
+    fi
+    
+    if systemctl is-active --quiet docker 2>/dev/null; then
+        pass "Docker service is running"
+    else
+        fail "Docker service not running"
+    fi
+    
+    # Verify Docker can actually run containers
+    if command -v docker &>/dev/null && systemctl is-active --quiet docker 2>/dev/null; then
+        if docker info &>/dev/null; then
+            pass "Docker daemon responding"
+        else
+            fail "Docker daemon not responding (docker info failed)"
+        fi
+    fi
+    echo ""
+    
+    # ── 7. Clean Docker state ─────────────────────────────────────────────
+    echo -e "${GREEN}[7/8] Clean Docker state (no leftover containers)...${NC}"
+    
+    if command -v docker &>/dev/null && systemctl is-active --quiet docker 2>/dev/null; then
+        local CONTAINER_COUNT=$(docker ps -a --format "{{.Names}}" 2>/dev/null | wc -l)
+        if [ "$CONTAINER_COUNT" -eq 0 ]; then
+            pass "No Docker containers present (clean state)"
+        else
+            fail "${CONTAINER_COUNT} leftover container(s) found:"
+            docker ps -a --format "  {{.Names}}  ({{.Status}})  {{.Image}}" 2>/dev/null | while read -r line; do
+                echo -e "         ${RED}$line${NC}"
+            done
+            echo "         Run option 13 (Repair) to remove them"
+        fi
+        
+        # Check for leftover IoT Edge network
+        if docker network ls --format "{{.Name}}" 2>/dev/null | grep -qx "azure-iot-edge"; then
+            fail "Leftover Docker network 'azure-iot-edge' found"
+            echo "         Run: docker network rm azure-iot-edge"
+        else
+            pass "No leftover azure-iot-edge Docker network"
+        fi
+    else
+        warn "Cannot check Docker state (Docker not running)"
+    fi
+    echo ""
+    
+    # ── 8. Network / DNS readiness ────────────────────────────────────────
+    echo -e "${GREEN}[8/8] Network readiness (local checks only)...${NC}"
+    
+    # Check DNS resolution works (using a non-Azure domain to avoid triggering anything)
+    if timeout 5 nslookup google.com &>/dev/null; then
+        pass "DNS resolution working"
+    else
+        fail "DNS resolution failed — containers won't be able to pull images"
+    fi
+    
+    # Check we can resolve the DPS endpoint (DNS only, no HTTP connection)
+    if timeout 5 nslookup global.azure-devices-provisioning.net &>/dev/null; then
+        pass "Can resolve global.azure-devices-provisioning.net (DNS only)"
+    else
+        warn "Cannot resolve DPS endpoint — check DNS/firewall"
+    fi
+    
+    # Check we can resolve the ACR endpoint (DNS only, no HTTP connection)
+    if timeout 5 nslookup openpointiotmodules-aubsa0egcxaycybt.azurecr.io &>/dev/null; then
+        pass "Can resolve ACR (openpointiotmodules-*.azurecr.io) (DNS only)"
+    else
+        warn "Cannot resolve ACR endpoint — module images won't pull"
+    fi
+    echo ""
+    
+    # ── Summary ───────────────────────────────────────────────────────────
+    echo -e "${BLUE}════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}│         HEALTH CHECK RESULTS               │${NC}"
+    echo -e "${BLUE}════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "  ${GREEN}PASS: ${PASS}${NC}   ${YELLOW}WARN: ${WARN}${NC}   ${RED}FAIL: ${FAIL}${NC}"
+    echo ""
+    
+    if [ $FAIL -eq 0 ]; then
+        echo -e "${GREEN}══════════════════════════════════════════════════════════${NC}"
+        echo -e "${GREEN}│  ✅ ALL CHECKS PASSED — SAFE TO PROVISION               │${NC}"
+        echo -e "${GREEN}══════════════════════════════════════════════════════════${NC}"
+        echo ""
+        echo "The installation is clean. You can now safely:"
+        echo ""
+        echo "  1. sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
+        echo "  2. sudo nano /etc/aziot/config.toml   # Add DPS provisioning details"
+        echo "  3. sudo iotedge config apply           # ← This contacts Azure (starts DPS)"
+        echo ""
+        if [ $WARN -gt 0 ]; then
+            echo -e "${YELLOW}Review the warnings above but they won't prevent provisioning.${NC}"
+            echo ""
+        fi
+        echo -e "${CYAN}Safe commands to run NOW (before config apply):${NC}"
+        echo "  iotedge --version          # Print version (no network)"
+        echo "  iotedge system status      # Check service states (should all be inactive)"
+        echo ""
+        echo -e "${YELLOW}Commands to AVOID until after config apply:${NC}"
+        echo "  iotedge list               # Hangs — needs running services"
+        echo "  iotedge check              # Probes Azure endpoints"
+        echo ""
+        echo -e "${CYAN}After config apply, verify with:${NC}"
+        echo "  sudo iotedge system status # All services should be 'active (running)'"
+        echo "  sudo iotedge list          # Should show edgeAgent within ~2 minutes"
+        echo ""
+        return 0
+    else
+        echo -e "${RED}══════════════════════════════════════════════════════════${NC}"
+        echo -e "${RED}│  ❌ ${FAIL} CHECK(S) FAILED — DO NOT PROVISION YET         │${NC}"
+        echo -e "${RED}══════════════════════════════════════════════════════════${NC}"
+        echo ""
+        echo -e "${RED}Fix the failures above before running 'iotedge config apply'.${NC}"
+        echo -e "${RED}Provisioning with a broken install may corrupt Azure state${NC}"
+        echo -e "${RED}(corrupted device identity, broken DPS enrollment, portal crash).${NC}"
+        echo ""
+        echo -e "${YELLOW}Safe commands you CAN run to investigate:${NC}"
+        echo "  iotedge --version          # Verify binary exists"
+        echo "  iotedge system status      # Check if anything is unexpectedly running"
+        echo "  dpkg -l aziot-edge         # Check package state (should show 'ii')"
+        echo "  sudo systemctl stop aziot-identityd  # Stop if it's running!"
+        echo ""
+        return 1
+    fi
 }
 
 # Full setup
@@ -2424,6 +2687,10 @@ main() {
                 ;;
             13)
                 repair_iotedge
+                read -p "Press ENTER to return to menu..." dummy
+                ;;
+            14)
+                verify_iotedge_health
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             0)
