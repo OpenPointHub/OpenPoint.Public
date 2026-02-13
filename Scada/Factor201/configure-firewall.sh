@@ -396,22 +396,75 @@ configure_ssh_access() {
         fi
     fi
     
-    # Detect device IP and suggest local network
+    # Detect device IPs and suggest local networks
     local DETECTED_SUBNET=""
-    local DEVICE_IP=""
-    local PRIMARY_IFACE=""
-    PRIMARY_IFACE=$(ip route 2>/dev/null | grep default | awk '{print $5}' | head -1)
-    if [ -n "$PRIMARY_IFACE" ]; then
-        DEVICE_IP=$(ip -4 addr show "$PRIMARY_IFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-        if [ -n "$DEVICE_IP" ]; then
-            DETECTED_SUBNET="${DEVICE_IP%.*}.0/24"
-            echo -e "${CYAN}Detected network interface:${NC}"
-            echo -e "  Interface: ${GREEN}$PRIMARY_IFACE${NC}"
-            echo -e "  Device IP: ${GREEN}$DEVICE_IP${NC}"
-            echo -e "  Local network: ${GREEN}$DETECTED_SUBNET${NC}"
-            echo ""
-        fi
+    local DEFAULT_IFACE=""
+    local SSH_IFACE=""
+    local IFACE_COUNT=0
+    DEFAULT_IFACE=$(ip route 2>/dev/null | grep default | awk '{print $5}' | head -1)
+    
+    # Try to detect which interface the SSH session is on
+    # This ensures we suggest the right subnet even if default route is on another interface
+    local SSH_CLIENT_IP=""
+    if [ -n "$SSH_CONNECTION" ]; then
+        SSH_CLIENT_IP=$(echo "$SSH_CONNECTION" | awk '{print $1}')
     fi
+    if [ -z "$SSH_CLIENT_IP" ]; then
+        SSH_CLIENT_IP=$(who am i 2>/dev/null | grep -oP '\(\K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(?=\))' | head -1)
+    fi
+    if [ -z "$SSH_CLIENT_IP" ]; then
+        SSH_CLIENT_IP=$(ss -tnp 2>/dev/null | grep ":22 " | grep ESTAB | awk '{print $5}' | grep -oP '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    fi
+    # Find which interface the SSH client connects through
+    if [ -n "$SSH_CLIENT_IP" ]; then
+        SSH_IFACE=$(ip route get "$SSH_CLIENT_IP" 2>/dev/null | grep -oP '(?<=dev\s)\S+' | head -1)
+    fi
+    
+    echo -e "${CYAN}Detected network interfaces:${NC}"
+    while IFS= read -r iface; do
+        # Skip loopback and virtual interfaces (Docker, bridges, etc.)
+        [[ "$iface" == lo ]] && continue
+        [[ "$iface" == docker* ]] && continue
+        [[ "$iface" == veth* ]] && continue
+        [[ "$iface" == br-* ]] && continue
+        
+        local iface_ip
+        iface_ip=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+        [ -z "$iface_ip" ] && continue
+        
+        local iface_subnet="${iface_ip%.*}.0/24"
+        IFACE_COUNT=$((IFACE_COUNT + 1))
+        
+        # Build label for this interface
+        local iface_label=""
+        if [ "$iface" = "$SSH_IFACE" ]; then
+            iface_label=" (SSH session)"
+            DETECTED_SUBNET="$iface_subnet"
+        elif [ "$iface" = "$DEFAULT_IFACE" ]; then
+            iface_label=" (default route)"
+        fi
+        
+        echo -e "  ${GREEN}$iface${NC}: $iface_ip → $iface_subnet$iface_label"
+        
+        # Fallback: use default route interface, then first interface
+        if [ -z "$DETECTED_SUBNET" ]; then
+            if [ "$iface" = "$DEFAULT_IFACE" ]; then
+                DETECTED_SUBNET="$iface_subnet"
+            fi
+        fi
+        if [ -z "$DETECTED_SUBNET" ]; then
+            DETECTED_SUBNET="$iface_subnet"
+        fi
+    done < <(ls /sys/class/net/ 2>/dev/null)
+    
+    if [ "$IFACE_COUNT" -eq 0 ]; then
+        echo -e "  ${YELLOW}No network interfaces detected${NC}"
+    elif [ "$IFACE_COUNT" -gt 1 ]; then
+        echo ""
+        echo -e "  ${YELLOW}Multiple interfaces detected. You may need to add SSH${NC}"
+        echo -e "  ${YELLOW}access for each network you manage this device from.${NC}"
+    fi
+    echo ""
     
     echo "SSH access can be configured in two ways:"
     echo ""
