@@ -73,6 +73,27 @@ install_ufw() {
     fi
 }
 
+# Detect active SSH session and automatically add firewall rule to protect it
+# Returns 0 if SSH rule was added, 1 if no SSH session detected
+protect_ssh_session() {
+    # Check for active SSH session via environment variable
+    if [ -n "$SSH_CONNECTION" ]; then
+        local SSH_CLIENT_IP
+        SSH_CLIENT_IP=$(echo "$SSH_CONNECTION" | awk '{print $1}')
+        
+        echo -e "  ${YELLOW}SSH session detected from ${CYAN}$SSH_CLIENT_IP${NC}"
+        echo "  Automatically adding SSH rule to prevent lockout..."
+        
+        ufw allow from $SSH_CLIENT_IP to any port 22 proto tcp comment "SSH from $SSH_CLIENT_IP" > /dev/null 2>&1
+        echo -e "${GREEN}  ✓ SSH allowed from $SSH_CLIENT_IP (port 22)${NC}"
+        
+        MGMT_NETWORK="$SSH_CLIENT_IP"
+        return 0
+    fi
+    
+    return 1
+}
+
 # Save configuration
 save_config() {
     local rtac_ip=$1
@@ -151,7 +172,15 @@ configure_basic_firewall() {
     ufw allow out 80/tcp comment 'HTTP - System updates' > /dev/null 2>&1
     echo -e "${GREEN}[6/6] HTTP rules configured${NC}"
     
+    # Protect SSH session before enabling firewall
+    echo ""
+    local SSH_PROTECTED=false
+    if protect_ssh_session; then
+        SSH_PROTECTED=true
+    fi
+    
     # Enable UFW
+    echo ""
     ufw --force enable > /dev/null 2>&1
     
     echo ""
@@ -163,8 +192,12 @@ configure_basic_firewall() {
     echo "  • Outbound AMQPS to Azure (port 5671)"
     echo "  • Outbound HTTPS (port 443)"
     echo "  • Outbound HTTP (port 80)"
-    echo ""
-    echo -e "${YELLOW}⚠️  SSH access not configured. Use Option 4 to enable SSH.${NC}"
+    if [ "$SSH_PROTECTED" = true ]; then
+        echo "  • Inbound SSH (port 22) from $MGMT_NETWORK"
+    else
+        echo ""
+        echo -e "${YELLOW}⚠️  SSH access not configured. Use Option 4 to enable SSH.${NC}"
+    fi
     echo ""
 }
 
@@ -249,7 +282,15 @@ configure_full_firewall() {
     ufw allow out to $RTAC_IP port 443 proto tcp comment "RTAC HTTPS - $RTAC_IP" > /dev/null 2>&1
     echo -e "${GREEN}[8/8] RTAC HTTPS access configured${NC}"
     
+    # Protect SSH session before enabling firewall
+    echo ""
+    local SSH_PROTECTED=false
+    if protect_ssh_session; then
+        SSH_PROTECTED=true
+    fi
+    
     # Enable UFW
+    echo ""
     ufw --force enable > /dev/null 2>&1
     
     # Save config
@@ -266,8 +307,12 @@ configure_full_firewall() {
     echo "  • Outbound HTTP (port 80)"
     echo "  • Outbound HTTP to RTAC ($RTAC_IP:80)"
     echo "  • Outbound HTTPS to RTAC ($RTAC_IP:443)"
-    echo ""
-    echo -e "${YELLOW}⚠️  SSH access not configured. Use Option 4 to enable SSH.${NC}"
+    if [ "$SSH_PROTECTED" = true ]; then
+        echo "  • Inbound SSH (port 22) from $MGMT_NETWORK"
+    else
+        echo ""
+        echo -e "${YELLOW}⚠️  SSH access not configured. Use Option 4 to enable SSH.${NC}"
+    fi
     echo ""
 }
 
