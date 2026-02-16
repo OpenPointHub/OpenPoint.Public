@@ -1330,11 +1330,16 @@ EOF
 # before IoT Edge starts any containers. This runs on every service start,
 # restart, and crash recovery.
 #
+# The "+" prefix is CRITICAL: it tells systemd to run the command as root
+# even though aziot-edged.service runs as a non-root user (iotedge/aziotedge).
+# Without "+", chown runs as the service user and fails with
+# "operation not permitted" — which causes the entire service to fail.
+#
 # edgeAgent = UID 13622 (edgeagentuser inside container)
 # edgeHub   = UID 13623 (edgehubuser inside container)
-ExecStartPre=/bin/mkdir -p /var/lib/iotedge/edgeAgent /var/lib/iotedge/edgeHub
-ExecStartPre=/bin/chown -R 13622:13622 /var/lib/iotedge/edgeAgent
-ExecStartPre=/bin/chown -R 13623:13623 /var/lib/iotedge/edgeHub
+ExecStartPre=+/bin/mkdir -p /var/lib/iotedge/edgeAgent /var/lib/iotedge/edgeHub
+ExecStartPre=+/bin/chown -R 13622:13622 /var/lib/iotedge/edgeAgent
+ExecStartPre=+/bin/chown -R 13623:13623 /var/lib/iotedge/edgeHub
 EOF
     
     echo "  ✓ Created systemd drop-in for ${SERVICE_NAME}.service"
@@ -2703,8 +2708,12 @@ verify_iotedge_health() {
     fi
     
     if [ -n "$DROPIN_DIR" ] && [ -f "${DROPIN_DIR}/persistent-storage.conf" ]; then
-        if grep -q "ExecStartPre" "${DROPIN_DIR}/persistent-storage.conf" 2>/dev/null; then
-            pass "Systemd drop-in has ExecStartPre (ownership auto-fixed before every start)"
+        if grep -q "ExecStartPre=+" "${DROPIN_DIR}/persistent-storage.conf" 2>/dev/null; then
+            pass "Systemd drop-in has ExecStartPre=+ (runs chown as root before every start)"
+        elif grep -q "ExecStartPre=" "${DROPIN_DIR}/persistent-storage.conf" 2>/dev/null; then
+            fail "Systemd drop-in has ExecStartPre WITHOUT '+' prefix — chown runs as non-root and fails"
+            echo "         Fix: re-run option 7 (Persistent Storage) to update the drop-in"
+            echo "         The '+' prefix tells systemd to run the command as root"
         else
             warn "Systemd drop-in exists but missing ExecStartPre — re-run option 7 to upgrade"
             echo "         Old drop-in only had environment variables (no protection)"
