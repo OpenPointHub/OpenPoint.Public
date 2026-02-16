@@ -76,6 +76,7 @@ show_menu() {
     echo -e "  ${GREEN}12${NC}) Enable TPM Hardware - Enable Nuvoton NPCT750 TPM SPI overlay (requires reboot)"
     echo -e "  ${GREEN}13${NC}) ${YELLOW}Repair IoT Edge${NC} - Purge and clean reinstall (fixes broken installs)"
     echo -e "  ${GREEN}14${NC}) ${CYAN}Pre-Provision Health Check${NC} - Verify install is clean before connecting to Azure"
+    echo -e "  ${GREEN}15${NC}) ${RED}Quarantine Device${NC} - Immediately stop & disable all Azure IoT services"
     echo ""
     echo -e "  ${YELLOW}0${NC}) Exit"
     echo ""
@@ -1190,26 +1191,61 @@ persist_iot_edge_storage() {
     # Temporarily disable exit-on-error for this function
     set +e
     
-    echo -e "${GREEN}[1/3] Creating persistent storage directories...${NC}"
+    # ── Layer 1: Create directories and set ownership NOW ─────────────────
+    echo -e "${GREEN}[1/4] Creating persistent storage directories...${NC}"
     
     # Create directories on host for persistent storage
     mkdir -p /var/lib/iotedge/edgeAgent
     mkdir -p /var/lib/iotedge/edgeHub
     
-    # Set proper permissions (iotedge user/group created by aziot-edge package)
-    if getent passwd iotedge &>/dev/null; then
-        chown -R iotedge:iotedge /var/lib/iotedge
-    else
-        echo -e "  ${YELLOW}⚠ User 'iotedge' not found — install IoT Edge first (option 6)${NC}"
-    fi
+    # The edgeAgent container runs as 'edgeagentuser' (UID 13622) and
+    # edgeHub runs as 'edgehubuser' (UID 13623) INSIDE the container.
+    # The host directories MUST be owned by these UIDs so the container
+    # processes can write to the bind-mounted paths.
+    #
+    # WARNING: Do NOT use the host's 'iotedge' user here. That only worked
+    # when edgeAgent ran as root (pre-2025). Microsoft changed edgeAgent to
+    # run as a non-root user for security hardening. Using the wrong UID
+    # causes "access to path /home/edgeagentuser is denied" after any
+    # container image update or reboot.
+    chown -R 13622:13622 /var/lib/iotedge/edgeAgent
+    chown -R 13623:13623 /var/lib/iotedge/edgeHub
     chmod -R 755 /var/lib/iotedge
     
-    echo "  ✓ Created: /var/lib/iotedge/edgeAgent"
-    echo "  ✓ Created: /var/lib/iotedge/edgeHub"
+    echo "  ✓ Created: /var/lib/iotedge/edgeAgent (owner: UID 13622 / edgeagentuser)"
+    echo "  ✓ Created: /var/lib/iotedge/edgeHub (owner: UID 13623 / edgehubuser)"
     
-    # Create environment file for IoT Edge modules
+    # ── Layer 2: tmpfiles.d — auto-fix on every boot ─────────────────────
     echo ""
-    echo -e "${GREEN}[2/3] Configuring IoT Edge environment variables...${NC}"
+    echo -e "${GREEN}[2/4] Installing boot-time ownership guarantee (tmpfiles.d)...${NC}"
+    
+    # systemd-tmpfiles runs early in every boot and ensures these directories
+    # exist with the correct ownership. This catches:
+    #   - Package updates that reset ownership
+    #   - Manual mistakes (someone runs chown on /var/lib)
+    #   - Filesystem corruption after power loss
+    cat > /etc/tmpfiles.d/iotedge-storage.conf <<'EOF'
+# Persistent storage for Azure IoT Edge bind mounts.
+# edgeAgent runs as UID 13622, edgeHub as UID 13623 inside their containers.
+# These directories are bind-mounted via the deployment manifest:
+#   /var/lib/iotedge/edgeAgent:/tmp/edgeAgent
+#   /var/lib/iotedge/edgeHub:/tmp/edgeHub
+#
+# Type  Path                            Mode  UID    GID    Age  Argument
+d       /var/lib/iotedge                0755  root   root   -    -
+d       /var/lib/iotedge/edgeAgent      0755  13622  13622  -    -
+d       /var/lib/iotedge/edgeHub        0755  13623  13623  -    -
+EOF
+    
+    # Run it now so the rules take effect immediately (not just on next boot)
+    systemd-tmpfiles --create /etc/tmpfiles.d/iotedge-storage.conf 2>/dev/null
+    
+    echo "  ✓ Created /etc/tmpfiles.d/iotedge-storage.conf"
+    echo "    Directories will be verified/recreated on every boot automatically"
+    
+    # ── Layer 3: ExecStartPre — auto-fix before every service start ──────
+    echo ""
+    echo -e "${GREEN}[3/4] Installing service-start ownership guarantee (systemd drop-in)...${NC}"
     
     # Modern aziot-edge uses aziot-edged.service (not iotedge.service)
     local SERVICE_NAME=""
@@ -1224,27 +1260,174 @@ persist_iot_edge_storage() {
         return 0
     fi
     
-    # Create the drop-in directory and config
+    # This drop-in runs ownership fixup commands BEFORE aziot-edged starts.
+    # Even if something changed the ownership since last boot, this guarantees
+    # the directories are correct before any container tries to use them.
+    #
+    # This catches the scenario that broke devices in production:
+    #   1. Microsoft pushes updated edgeAgent image (now runs as UID 13622)
+    #   2. IoT Edge pulls the new image and recreates the container
+    #   3. Container tries to write to bind-mounted /tmp/edgeAgent
+    #   4. Host directory is owned by wrong UID → "permission denied" → Failed
+    #
+    # With ExecStartPre, step 3 always succeeds because ownership is fixed
+    # moments before the container starts.
     mkdir -p /etc/systemd/system/${SERVICE_NAME}.service.d
     cat > /etc/systemd/system/${SERVICE_NAME}.service.d/persistent-storage.conf <<'EOF'
 [Service]
-Environment="EDGEAGENT_STORAGE_PATH=/var/lib/iotedge/edgeAgent"
-Environment="EDGEHUB_STORAGE_PATH=/var/lib/iotedge/edgeHub"
+# Ensure persistent storage directories exist and have correct ownership
+# before IoT Edge starts any containers. This runs on every service start,
+# restart, and crash recovery.
+#
+# edgeAgent = UID 13622 (edgeagentuser inside container)
+# edgeHub   = UID 13623 (edgehubuser inside container)
+ExecStartPre=/bin/mkdir -p /var/lib/iotedge/edgeAgent /var/lib/iotedge/edgeHub
+ExecStartPre=/bin/chown -R 13622:13622 /var/lib/iotedge/edgeAgent
+ExecStartPre=/bin/chown -R 13623:13623 /var/lib/iotedge/edgeHub
 EOF
     
     echo "  ✓ Created systemd drop-in for ${SERVICE_NAME}.service"
+    echo "    Ownership will be verified/fixed before every service start"
     
     # Reload systemd to pick up changes
     echo ""
-    echo -e "${GREEN}[3/3] Reloading systemd configuration...${NC}"
+    echo -e "${GREEN}[4/4] Reloading systemd configuration...${NC}"
     systemctl daemon-reload
     echo "  ✓ Systemd configuration reloaded"
+    
+    # ── Auto-restart IoT Edge if device is already provisioned ───────────
+    # When this function runs on a device that was already provisioned
+    # (e.g., fixing a broken edgeAgent after a Microsoft image update),
+    # just fixing ownership isn't enough — the failed container is still
+    # sitting in Docker with "Failed" status. We need to:
+    #   1. Remove the failed edgeAgent/edgeHub containers so Docker
+    #      recreates them with the now-correct bind mount ownership
+    #   2. Restart IoT Edge services so they pull fresh containers
+    #
+    # We only do this if config.toml exists (device was provisioned).
+    # If config.toml doesn't exist, this is a fresh install and the user
+    # hasn't run "iotedge config apply" yet — nothing to restart.
+    if [ -f /etc/aziot/config.toml ]; then
+        echo ""
+        echo -e "${RED}═══════════════════════════════════════════${NC}"
+        echo -e "${RED}│  PROVISIONED DEVICE DETECTED               │${NC}"
+        echo -e "${RED}═══════════════════════════════════════════${NC}"
+        echo ""
+        
+        # SAFETY FIRST: Immediately stop all aziot services.
+        # If this device was broken (e.g., bad permissions, missing config.d),
+        # the services may have auto-started on boot and could be making
+        # partial/broken calls to Azure DPS right now — corrupting enrollments
+        # and device identities in IoT Hub. Stop them before anything else.
+        echo -e "${YELLOW}  Stopping all Azure IoT services immediately (damage control)...${NC}"
+        for svc in aziot-edged aziot-identityd aziot-keyd aziot-certd aziot-tpmd; do
+            systemctl stop "${svc}.service" 2>/dev/null && echo "  ✓ Stopped ${svc}" || true
+        done
+        echo ""
+        
+        # Remove failed/stale edgeAgent and edgeHub containers
+        # They will be recreated by IoT Edge with the corrected ownership
+        if command -v docker &>/dev/null && systemctl is-active --quiet docker 2>/dev/null; then
+            for container in edgeAgent edgeHub; do
+                if docker ps -a --format "{{.Names}}" 2>/dev/null | grep -qx "$container"; then
+                    local STATUS=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)
+                    docker rm -f "$container" 2>/dev/null
+                    echo "  ✓ Removed $container container (was: ${STATUS:-unknown})"
+                fi
+            done
+        fi
+        
+        echo -e "${YELLOW}  ⚠️  This device has an existing config.toml (previously provisioned).${NC}"
+        echo ""
+        echo "  Running 'iotedge config apply' will:"
+        echo "    • Regenerate derived config files (00-super.toml)"
+        echo "    • Restart all Azure IoT services"
+        echo -e "    • ${RED}CONTACT AZURE DPS immediately${NC}"
+        echo ""
+        echo "  If this device was corrupting Azure state (broken DPS enrollment,"
+        echo "  phantom device identity, portal errors), you must FIRST:"
+        echo "    1. Disable or delete the DPS enrollment in Azure Portal"
+        echo "    2. Delete the corrupted device identity in IoT Hub"
+        echo "    3. Then come back and apply config"
+        echo ""
+        read -p "  Apply config and reconnect to Azure now? (y/N): " APPLY_CONFIRM
+        echo ""
+        
+        if [[ $APPLY_CONFIRM =~ ^[Yy]$ ]]; then
+            # User confirmed — proceed with config apply
+            # Use "iotedge config apply" instead of "iotedge system restart".
+            # config apply does everything system restart does PLUS regenerates the
+            # derived config files (e.g., /etc/aziot/edged/config.d/00-super.toml)
+            # from config.toml. This is critical when the config.d directories were
+            # missing/recreated — without the generated 00-super.toml, the services
+            # start but immediately fail because they have no runtime config.
+            #
+            # "iotedge config apply" reads config.toml → writes 00-super.toml into
+            # each service's config.d/ → restarts all aziot services.
+            # The ExecStartPre drop-in fires during that restart, fixing ownership.
+            if command -v iotedge &>/dev/null; then
+                echo "  Applying configuration and restarting IoT Edge services..."
+                iotedge config apply 2>&1 | sed 's/^/    /'
+                local apply_result=$?
+                
+                if [ $apply_result -eq 0 ]; then
+                    echo -e "  ${GREEN}✓ IoT Edge config applied and services restarted${NC}"
+                    echo ""
+                    echo "  Waiting 15 seconds for edgeAgent to start..."
+                    sleep 15
+                    
+                    # Quick status check
+                    echo ""
+                    echo "  Current service status:"
+                    iotedge system status 2>/dev/null | sed 's/^/    /' || echo "    (could not get status)"
+                    
+                    echo ""
+                    echo "  Container status:"
+                    docker ps --format "    {{.Names}}  {{.Status}}  {{.Image}}" 2>/dev/null || echo "    (could not list containers)"
+                else
+                    echo -e "  ${YELLOW}⚠ iotedge config apply returned exit code $apply_result${NC}"
+                    echo "  You may need to apply manually:"
+                    echo "    sudo iotedge config apply"
+                fi
+            else
+                echo -e "  ${YELLOW}⚠ iotedge command not found — restart manually after installing IoT Edge${NC}"
+            fi
+        else
+            # User declined — keep services stopped and disable auto-start.
+            # This ensures the device does NOT contact Azure on next reboot.
+            echo -e "${CYAN}  Keeping Azure IoT services DISABLED (safe mode).${NC}"
+            echo ""
+            for svc in aziot-edged aziot-identityd aziot-keyd aziot-certd aziot-tpmd; do
+                systemctl disable "${svc}.service" 2>/dev/null || true
+            done
+            echo "  ✓ All aziot services stopped and disabled (won't start on reboot)"
+            echo ""
+            echo -e "${CYAN}  The device is now SAFE — it will not contact Azure.${NC}"
+            echo ""
+            echo "  When you're ready to reconnect:"
+            echo "    1. Clean Azure state first:"
+            echo "       • DPS → Manage enrollments → delete/disable the enrollment"
+            echo "       • IoT Hub → Devices → delete the corrupted device identity"
+            echo "    2. Re-enable services and apply config:"
+            echo "       sudo systemctl enable aziot-edged aziot-identityd aziot-keyd aziot-certd"
+            echo "       sudo iotedge config apply"
+            echo "    3. Verify:"
+            echo "       sudo iotedge system status"
+            echo "       sudo iotedge list"
+        fi
+    fi
     
     # Re-enable exit-on-error
     set -e
     
     echo ""
     echo -e "${GREEN}✓ Persistent storage configured${NC}"
+    echo ""
+    echo "Protection layers installed:"
+    echo "  ✓ Layer 1: Directories created with correct ownership (just now)"
+    echo "  ✓ Layer 2: tmpfiles.d — ownership auto-fixed on every boot"
+    echo "  ✓ Layer 3: ExecStartPre — ownership auto-fixed before every service start"
+    echo "  ✓ Layer 4: Health check (option 14) — validates ownership on demand"
     echo ""
     echo -e "${CYAN}ℹ️  To use persistent storage in your deployment manifest:${NC}"
     echo ""
@@ -2214,9 +2397,15 @@ repair_iotedge() {
     echo "     sudo iotedge list"
     echo ""
     
-    # Re-run persistent storage setup if directories exist
+    # Fix persistent storage ownership if directories survive the repair.
+    # edgeAgent runs as UID 13622, edgeHub as UID 13623 inside the container.
     if [ -d /var/lib/iotedge ]; then
         echo -e "${CYAN}ℹ️  Persistent storage directories (/var/lib/iotedge) still exist.${NC}"
+        echo "  Fixing ownership to match container UIDs..."
+        [ -d /var/lib/iotedge/edgeAgent ] && chown -R 13622:13622 /var/lib/iotedge/edgeAgent
+        [ -d /var/lib/iotedge/edgeHub ]   && chown -R 13623:13623 /var/lib/iotedge/edgeHub
+        chmod -R 755 /var/lib/iotedge
+        echo -e "  ${GREEN}✓ Ownership corrected (edgeAgent=13622, edgeHub=13623)${NC}"
         echo "  Run option 7 after provisioning to re-apply the systemd drop-in."
         echo ""
     fi
@@ -2252,7 +2441,7 @@ verify_iotedge_health() {
     warn() { echo -e "  ${YELLOW}⚠ WARN${NC} — $1"; WARN=$((WARN + 1)); }
     
     # ── 1. Package integrity ──────────────────────────────────────────────
-    echo -e "${GREEN}[1/8] Package integrity...${NC}"
+    echo -e "${GREEN}[1/10] Package integrity...${NC}"
     
     # Check aziot-edge package is fully installed (not half-configured)
     local EDGE_STATUS=$(dpkg -l aziot-edge 2>/dev/null | grep "^ii" | awk '{print $3}')
@@ -2283,7 +2472,7 @@ verify_iotedge_health() {
     echo ""
     
     # ── 2. Critical binaries ──────────────────────────────────────────────
-    echo -e "${GREEN}[2/8] Critical binaries...${NC}"
+    echo -e "${GREEN}[2/10] Critical binaries...${NC}"
     
     for bin in iotedge aziot-edged aziot-identityd aziot-keyd aziot-certd; do
         if command -v "$bin" &>/dev/null; then
@@ -2295,7 +2484,7 @@ verify_iotedge_health() {
     echo ""
     
     # ── 3. Critical directories ───────────────────────────────────────────
-    echo -e "${GREEN}[3/8] Critical directories...${NC}"
+    echo -e "${GREEN}[3/10] Critical directories...${NC}"
     
     for dir in /etc/aziot /etc/aziot/edged/config.d /etc/aziot/keyd/config.d /etc/aziot/certd/config.d /etc/aziot/identityd/config.d; do
         if [ -d "$dir" ]; then
@@ -2307,7 +2496,7 @@ verify_iotedge_health() {
     echo ""
     
     # ── 4. Config template ────────────────────────────────────────────────
-    echo -e "${GREEN}[4/8] Configuration state...${NC}"
+    echo -e "${GREEN}[4/10] Configuration state...${NC}"
     
     if [ -f /etc/aziot/config.toml.edge.template ]; then
         pass "Config template exists (/etc/aziot/config.toml.edge.template)"
@@ -2325,7 +2514,7 @@ verify_iotedge_health() {
     echo ""
     
     # ── 5. Systemd unit files ─────────────────────────────────────────────
-    echo -e "${GREEN}[5/8] Systemd services...${NC}"
+    echo -e "${GREEN}[5/10] Systemd services...${NC}"
     
     for svc in aziot-edged aziot-identityd aziot-keyd aziot-certd; do
         if systemctl list-unit-files "${svc}.service" &>/dev/null 2>&1; then
@@ -2353,7 +2542,7 @@ verify_iotedge_health() {
     echo ""
     
     # ── 6. Docker engine ──────────────────────────────────────────────────
-    echo -e "${GREEN}[6/8] Docker engine...${NC}"
+    echo -e "${GREEN}[6/10] Docker engine...${NC}"
     
     if command -v docker &>/dev/null; then
         pass "Docker binary found"
@@ -2378,7 +2567,7 @@ verify_iotedge_health() {
     echo ""
     
     # ── 7. Clean Docker state ─────────────────────────────────────────────
-    echo -e "${GREEN}[7/8] Clean Docker state (no leftover containers)...${NC}"
+    echo -e "${GREEN}[7/10] Clean Docker state (no leftover containers)...${NC}"
     
     if command -v docker &>/dev/null && systemctl is-active --quiet docker 2>/dev/null; then
         local CONTAINER_COUNT=$(docker ps -a --format "{{.Names}}" 2>/dev/null | wc -l)
@@ -2404,8 +2593,74 @@ verify_iotedge_health() {
     fi
     echo ""
     
-    # ── 8. Network / DNS readiness ────────────────────────────────────────
-    echo -e "${GREEN}[8/8] Network readiness (local checks only)...${NC}"
+    # ── 8. Persistent storage ownership ───────────────────────────────────
+    echo -e "${GREEN}[8/10] Persistent storage ownership...${NC}"
+    
+    if [ -d /var/lib/iotedge/edgeAgent ]; then
+        local EA_OWNER=$(stat -c '%u' /var/lib/iotedge/edgeAgent 2>/dev/null)
+        if [ "$EA_OWNER" = "13622" ]; then
+            pass "/var/lib/iotedge/edgeAgent owned by UID 13622 (edgeagentuser)"
+        else
+            fail "/var/lib/iotedge/edgeAgent owned by UID ${EA_OWNER} — must be 13622"
+            echo "         Fix: sudo chown -R 13622:13622 /var/lib/iotedge/edgeAgent"
+            echo "         Or re-run option 7 (Persistent Storage)"
+        fi
+    else
+        warn "/var/lib/iotedge/edgeAgent not created yet — run option 7"
+    fi
+    
+    if [ -d /var/lib/iotedge/edgeHub ]; then
+        local EH_OWNER=$(stat -c '%u' /var/lib/iotedge/edgeHub 2>/dev/null)
+        if [ "$EH_OWNER" = "13623" ]; then
+            pass "/var/lib/iotedge/edgeHub owned by UID 13623 (edgehubuser)"
+        else
+            fail "/var/lib/iotedge/edgeHub owned by UID ${EH_OWNER} — must be 13623"
+            echo "         Fix: sudo chown -R 13623:13623 /var/lib/iotedge/edgeHub"
+            echo "         Or re-run option 7 (Persistent Storage)"
+        fi
+    else
+        warn "/var/lib/iotedge/edgeHub not created yet — run option 7"
+    fi
+    echo ""
+    
+    # ── 9. Storage protection layers ───────────────────────────────────────
+    echo -e "${GREEN}[9/10] Storage protection layers (auto-recovery)...${NC}"
+    
+    # Check tmpfiles.d config exists (boot-time protection)
+    if [ -f /etc/tmpfiles.d/iotedge-storage.conf ]; then
+        if grep -q "13622" /etc/tmpfiles.d/iotedge-storage.conf 2>/dev/null && \
+           grep -q "13623" /etc/tmpfiles.d/iotedge-storage.conf 2>/dev/null; then
+            pass "tmpfiles.d config installed (ownership auto-fixed on every boot)"
+        else
+            fail "tmpfiles.d config exists but has wrong UIDs — re-run option 7"
+        fi
+    else
+        fail "tmpfiles.d config missing — ownership won't survive reboots"
+        echo "         Fix: re-run option 7 (Persistent Storage)"
+    fi
+    
+    # Check systemd drop-in has ExecStartPre (service-start protection)
+    local DROPIN_DIR=""
+    if [ -d /etc/systemd/system/aziot-edged.service.d ]; then
+        DROPIN_DIR="/etc/systemd/system/aziot-edged.service.d"
+    elif [ -d /etc/systemd/system/iotedge.service.d ]; then
+        DROPIN_DIR="/etc/systemd/system/iotedge.service.d"
+    fi
+    
+    if [ -n "$DROPIN_DIR" ] && [ -f "${DROPIN_DIR}/persistent-storage.conf" ]; then
+        if grep -q "ExecStartPre" "${DROPIN_DIR}/persistent-storage.conf" 2>/dev/null; then
+            pass "Systemd drop-in has ExecStartPre (ownership auto-fixed before every start)"
+        else
+            warn "Systemd drop-in exists but missing ExecStartPre — re-run option 7 to upgrade"
+            echo "         Old drop-in only had environment variables (no protection)"
+        fi
+    else
+        warn "No systemd drop-in for persistent storage — re-run option 7"
+    fi
+    echo ""
+    
+    # ── 10. Network / DNS readiness ───────────────────────────────────────
+    echo -e "${GREEN}[10/10] Network readiness (local checks only)...${NC}"
     
     # Check DNS resolution works (using a non-Azure domain to avoid triggering anything)
     if timeout 5 nslookup google.com &>/dev/null; then
@@ -2482,6 +2737,98 @@ verify_iotedge_health() {
         echo ""
         return 1
     fi
+}
+
+# Quarantine device — immediately stop and disable all Azure IoT services
+# Use this when a broken device is actively corrupting Azure DPS/IoT Hub state.
+# After quarantine, the device will NOT contact Azure even after reboot.
+quarantine_device() {
+    echo -e "${RED}════════════════════════════════════════════${NC}"
+    echo -e "${RED}│  QUARANTINE DEVICE                         │${NC}"
+    echo -e "${RED}════════════════════════════════════════════${NC}"
+    echo ""
+    echo "This will immediately:"
+    echo "  • Stop all Azure IoT Edge services"
+    echo "  • Disable them from starting on reboot"
+    echo "  • Stop all IoT Edge containers (edgeAgent, edgeHub, modules)"
+    echo ""
+    echo -e "${CYAN}The device will NOT contact Azure until you manually re-enable.${NC}"
+    echo ""
+    
+    # Step 1: Stop all aziot services immediately
+    echo -e "${GREEN}[1/3] Stopping all Azure IoT services...${NC}"
+    local SERVICES=("aziot-edged" "aziot-identityd" "aziot-keyd" "aziot-certd" "aziot-tpmd")
+    for svc in "${SERVICES[@]}"; do
+        if systemctl is-active --quiet "${svc}.service" 2>/dev/null; then
+            systemctl stop "${svc}.service" 2>/dev/null
+            echo -e "  ${GREEN}✓${NC} Stopped ${svc}"
+        else
+            echo "  · ${svc} already stopped"
+        fi
+    done
+    echo ""
+    
+    # Step 2: Disable auto-start on boot
+    echo -e "${GREEN}[2/3] Disabling auto-start on boot...${NC}"
+    for svc in "${SERVICES[@]}"; do
+        systemctl disable "${svc}.service" 2>/dev/null || true
+    done
+    echo "  ✓ All aziot services disabled (won't start on reboot)"
+    echo ""
+    
+    # Step 3: Stop containers
+    echo -e "${GREEN}[3/3] Stopping IoT Edge containers...${NC}"
+    if command -v docker &>/dev/null && systemctl is-active --quiet docker 2>/dev/null; then
+        for container in edgeAgent edgeHub; do
+            if docker ps -a --format "{{.Names}}" 2>/dev/null | grep -qx "$container"; then
+                local STATUS=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)
+                docker rm -f "$container" 2>/dev/null
+                echo "  ✓ Removed $container (was: ${STATUS:-unknown})"
+            fi
+        done
+        
+        # Also stop any module containers (ScadaPollingModule, etc.)
+        local MODULE_CONTAINERS=$(docker ps -a --format "{{.Names}}" 2>/dev/null | grep -v -E "^$")
+        if [ -n "$MODULE_CONTAINERS" ]; then
+            echo "$MODULE_CONTAINERS" | while read -r cname; do
+                docker stop "$cname" 2>/dev/null && echo "  ✓ Stopped $cname" || true
+            done
+        else
+            echo "  · No containers running"
+        fi
+    else
+        echo "  · Docker not running"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}│  DEVICE QUARANTINED                       │${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${CYAN}This device is now SAFE — it will not contact Azure, even after reboot.${NC}"
+    echo ""
+    echo "Next steps to fix and reconnect:"
+    echo ""
+    echo "  1. Clean Azure state from the portal:"
+    echo "     • DPS → Manage enrollments → Individual enrollments"
+    echo "       → Find the device → Delete registration (or disable)"
+    echo "     • IoT Hub → Devices → Find the device → Delete"
+    echo ""
+    echo "  2. Fix the device (choose one):"
+    echo "     • Option 13 (Repair) — purge and clean reinstall"
+    echo "     • Option 7 (Persistent Storage) — fix ownership only"
+    echo "     • Option 1 (Full Setup) — complete reinstall"
+    echo ""
+    echo "  3. Run option 14 (Health Check) to verify the install is clean"
+    echo ""
+    echo "  4. Re-enable and provision:"
+    echo "     sudo systemctl enable aziot-edged aziot-identityd aziot-keyd aziot-certd"
+    echo "     sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
+    echo "     sudo nano /etc/aziot/config.toml   # Add DPS details"
+    echo "     sudo iotedge config apply"
+    echo ""
+    
+    return 0
 }
 
 # Full setup
@@ -2691,6 +3038,10 @@ main() {
                 ;;
             14)
                 verify_iotedge_health
+                read -p "Press ENTER to return to menu..." dummy
+                ;;
+            15)
+                quarantine_device
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             0)
