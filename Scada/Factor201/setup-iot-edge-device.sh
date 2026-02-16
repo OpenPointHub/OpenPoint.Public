@@ -326,12 +326,34 @@ system_updates() {
         apt-get update --fix-missing
     fi
     
+    # Hold aziot packages so apt-get upgrade doesn't break them.
+    # A blanket upgrade can remove aziot binaries mid-flight, leaving
+    # service units intact but no executables — the exact failure mode
+    # that causes "aziot-edged binary not found" after reboot.
+    local HELD_PACKAGES=()
+    for pkg in aziot-edge aziot-identity-service; do
+        if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+            apt-mark hold "$pkg" > /dev/null 2>&1 && HELD_PACKAGES+=("$pkg")
+        fi
+    done
+    if [ ${#HELD_PACKAGES[@]} -gt 0 ]; then
+        echo "  ℹ️  Held packages during upgrade: ${HELD_PACKAGES[*]}"
+    fi
+    
     if ! apt-get upgrade -y --fix-missing 2>&1 | tail -20; then
         echo -e "${RED}  ✗ Failed to upgrade packages${NC}"
         echo "  Continuing anyway..."
     else
         echo "  ✓ System packages updated"
     fi
+    
+    # Unhold aziot packages
+    for pkg in "${HELD_PACKAGES[@]}"; do
+        apt-mark unhold "$pkg" > /dev/null 2>&1
+    done
+    
+    # Safety net: fix any broken packages left by a partial upgrade
+    apt-get --fix-broken install -y > /dev/null 2>&1
     
     # Install essential packages
     echo ""
@@ -736,6 +758,35 @@ iotedge_runtime() {
         echo ""
         echo "  Updating package lists..."
         apt-get update --fix-missing 2>&1 | tail -5
+        
+        # Repair any broken dpkg state before installing.
+        # If a previous apt-get upgrade partially removed aziot packages,
+        # dpkg will be in a half-configured state and the install below
+        # will fail. --fix-broken resolves this first.
+        echo ""
+        echo "  Checking for broken packages..."
+        apt-get --fix-broken install -y 2>&1 | tail -5
+        
+        # Clean up stale Docker state from a previous broken install.
+        # When aziot-edge breaks mid-upgrade, the binaries are gone but
+        # Docker still has orphaned edgeAgent/edgeHub containers and the
+        # azure-iot-edge network. If we reinstall without cleaning these,
+        # IoT Edge may fail to start because Docker refuses to recreate
+        # resources that already exist.
+        if command -v docker &>/dev/null && systemctl is-active --quiet docker 2>/dev/null; then
+            echo ""
+            echo "  Cleaning stale Docker state from previous install..."
+            for container in edgeAgent edgeHub; do
+                if docker ps -a --format "{{.Names}}" 2>/dev/null | grep -qx "$container"; then
+                    docker rm -f "$container" 2>/dev/null
+                    echo "  ✓ Removed orphaned container: $container"
+                fi
+            done
+            if docker network ls --format "{{.Name}}" 2>/dev/null | grep -qx "azure-iot-edge"; then
+                docker network rm azure-iot-edge 2>/dev/null
+                echo "  ✓ Removed stale network: azure-iot-edge"
+            fi
+        fi
         
         echo ""
         echo "  Installing Azure IoT Edge Runtime (this may take a few minutes)..."
@@ -1408,9 +1459,13 @@ EOF
             echo "    1. Clean Azure state first:"
             echo "       • DPS → Manage enrollments → delete/disable the enrollment"
             echo "       • IoT Hub → Devices → delete the corrupted device identity"
-            echo "    2. Re-enable services and apply config:"
-            echo "       sudo systemctl enable aziot-edged aziot-identityd aziot-keyd aziot-certd"
-            echo "       sudo iotedge config apply"
+            echo "    2. Re-enable and apply config (choose one):"
+            echo "       Option A (no reboot):"
+            echo "         sudo systemctl enable aziot-edged aziot-identityd aziot-keyd aziot-certd"
+            echo "         sudo iotedge config apply"
+            echo "       Option B (simpler — reboot re-enables everything):"
+            echo "         sudo systemctl enable aziot-edged aziot-identityd aziot-keyd aziot-certd"
+            echo "         sudo reboot"
             echo "    3. Verify:"
             echo "       sudo iotedge system status"
             echo "       sudo iotedge list"
@@ -2821,11 +2876,17 @@ quarantine_device() {
     echo ""
     echo "  3. Run option 14 (Health Check) to verify the install is clean"
     echo ""
-    echo "  4. Re-enable and provision:"
-    echo "     sudo systemctl enable aziot-edged aziot-identityd aziot-keyd aziot-certd"
-    echo "     sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
-    echo "     sudo nano /etc/aziot/config.toml   # Add DPS details"
-    echo "     sudo iotedge config apply"
+    echo "  4. Re-enable and provision (choose one):"
+    echo "     Option A (no reboot):"
+    echo "       sudo systemctl enable aziot-edged aziot-identityd aziot-keyd aziot-certd"
+    echo "       sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
+    echo "       sudo nano /etc/aziot/config.toml   # Add DPS details"
+    echo "       sudo iotedge config apply"
+    echo "     Option B (simpler — reboot re-enables everything):"
+    echo "       sudo systemctl enable aziot-edged aziot-identityd aziot-keyd aziot-certd"
+    echo "       sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
+    echo "       sudo nano /etc/aziot/config.toml   # Add DPS details"
+    echo "       sudo reboot"
     echo ""
     
     return 0
