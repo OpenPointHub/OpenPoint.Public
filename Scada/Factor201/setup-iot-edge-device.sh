@@ -833,13 +833,55 @@ iotedge_runtime() {
     # If these directories are missing, config apply will fail silently and
     # iotedge list will stall indefinitely because services can't start
     echo ""
-    echo "  Verifying IoT Edge directories..."
+    echo "  Verifying IoT Edge config directories..."
     local DIRS_OK=1
     for dir in /etc/aziot /etc/aziot/edged/config.d /etc/aziot/keyd/config.d /etc/aziot/certd/config.d /etc/aziot/identityd/config.d; do
         if [ ! -d "$dir" ]; then
             echo -e "${RED}  ✗ Missing directory: $dir${NC}"
             mkdir -p "$dir"
             echo -e "${GREEN}  ✓ Created: $dir${NC}"
+            DIRS_OK=0
+        fi
+    done
+    
+    # Verify runtime directories exist with correct ownership.
+    # These hold certificates (trust bundle), private keys, and service state.
+    # Without them, aziot-certd cannot store the trust bundle certificate and
+    # "iotedge config apply" fails with:
+    #   "could not load cert with id aziot-edged-trust-bundle -- not found"
+    #
+    # Each aziot service runs as a dedicated user and needs its own dirs:
+    #   aziot-keyd   → aziotks
+    #   aziot-certd  → aziotcs
+    #   aziot-identityd → aziotid
+    #   aziot-edged  → iotedge
+    echo ""
+    echo "  Verifying IoT Edge runtime directories..."
+    
+    # Format: "directory:owner:group"
+    local RUNTIME_DIRS=(
+        "/var/lib/aziot/keyd:aziotks:aziotks"
+        "/var/lib/aziot/certd:aziotcs:aziotcs"
+        "/var/lib/aziot/identityd:aziotid:aziotid"
+        "/var/lib/aziot/edged:iotedge:iotedge"
+        "/var/secrets/aziot/keyd:aziotks:aziotks"
+        "/var/secrets/aziot/certd:aziotcs:aziotcs"
+        "/var/secrets/aziot/identityd:aziotid:aziotid"
+    )
+    
+    for entry in "${RUNTIME_DIRS[@]}"; do
+        IFS=':' read -r dir owner group <<< "$entry"
+        if [ ! -d "$dir" ]; then
+            echo -e "${RED}  ✗ Missing runtime directory: $dir${NC}"
+            mkdir -p "$dir"
+            # Only chown if the user exists (created by aziot packages)
+            if id -u "$owner" &>/dev/null; then
+                chown "$owner:$group" "$dir"
+                chmod 0770 "$dir"
+                echo -e "${GREEN}  ✓ Created: $dir (owner: $owner)${NC}"
+            else
+                echo -e "${YELLOW}  ✓ Created: $dir (owner '$owner' not found — will be fixed on config apply)${NC}"
+            fi
             DIRS_OK=0
         fi
     done
@@ -2392,7 +2434,7 @@ repair_iotedge() {
         return 1
     fi
     
-    # Check critical directories
+    # Check critical config directories
     local ALL_DIRS_OK=1
     for dir in /etc/aziot /etc/aziot/edged/config.d /etc/aziot/keyd/config.d /etc/aziot/certd/config.d /etc/aziot/identityd/config.d; do
         if [ -d "$dir" ]; then
@@ -2401,6 +2443,35 @@ repair_iotedge() {
             echo -e "  ${RED}✗ Missing: $dir${NC}"
             mkdir -p "$dir"
             echo -e "  ${GREEN}  → Created${NC}"
+            ALL_DIRS_OK=0
+        fi
+    done
+    
+    # Check runtime directories (certificates, keys, state)
+    # Without these, aziot-certd cannot store the trust bundle and
+    # config apply fails with "aziot-edged-trust-bundle -- not found"
+    local RUNTIME_DIRS=(
+        "/var/lib/aziot/keyd:aziotks:aziotks"
+        "/var/lib/aziot/certd:aziotcs:aziotcs"
+        "/var/lib/aziot/identityd:aziotid:aziotid"
+        "/var/lib/aziot/edged:iotedge:iotedge"
+        "/var/secrets/aziot/keyd:aziotks:aziotks"
+        "/var/secrets/aziot/certd:aziotcs:aziotcs"
+        "/var/secrets/aziot/identityd:aziotid:aziotid"
+    )
+    
+    for entry in "${RUNTIME_DIRS[@]}"; do
+        IFS=':' read -r dir owner group <<< "$entry"
+        if [ -d "$dir" ]; then
+            echo "  ✓ $dir"
+        else
+            echo -e "  ${RED}✗ Missing: $dir${NC}"
+            mkdir -p "$dir"
+            if id -u "$owner" &>/dev/null; then
+                chown "$owner:$group" "$dir"
+                chmod 0770 "$dir"
+            fi
+            echo -e "  ${GREEN}  → Created (owner: $owner)${NC}"
             ALL_DIRS_OK=0
         fi
     done
@@ -2546,11 +2617,43 @@ verify_iotedge_health() {
     # ── 3. Critical directories ───────────────────────────────────────────
     echo -e "${GREEN}[3/10] Critical directories...${NC}"
     
+    echo "  Config directories:"
     for dir in /etc/aziot /etc/aziot/edged/config.d /etc/aziot/keyd/config.d /etc/aziot/certd/config.d /etc/aziot/identityd/config.d; do
         if [ -d "$dir" ]; then
             pass "$dir exists"
         else
             fail "$dir missing"
+        fi
+    done
+    
+    # Runtime directories hold certificates (trust bundle), private keys,
+    # and service state. Without them, aziot-certd cannot create the trust
+    # bundle and config apply fails with:
+    #   "could not load cert with id aziot-edged-trust-bundle -- not found"
+    echo "  Runtime directories:"
+    local RUNTIME_DIR_CHECKS=(
+        "/var/lib/aziot/keyd:aziotks"
+        "/var/lib/aziot/certd:aziotcs"
+        "/var/lib/aziot/identityd:aziotid"
+        "/var/lib/aziot/edged:iotedge"
+        "/var/secrets/aziot/keyd:aziotks"
+        "/var/secrets/aziot/certd:aziotcs"
+        "/var/secrets/aziot/identityd:aziotid"
+    )
+    
+    for entry in "${RUNTIME_DIR_CHECKS[@]}"; do
+        IFS=':' read -r dir expected_owner <<< "$entry"
+        if [ -d "$dir" ]; then
+            local actual_owner=$(stat -c '%U' "$dir" 2>/dev/null)
+            if [ "$actual_owner" = "$expected_owner" ]; then
+                pass "$dir (owner: $expected_owner)"
+            else
+                fail "$dir exists but owned by '$actual_owner' — expected '$expected_owner'"
+                echo "         Fix: sudo chown $expected_owner:$expected_owner $dir"
+            fi
+        else
+            fail "$dir missing — aziot services cannot store certs/keys/state"
+            echo "         Fix: re-run option 6 (IoT Edge Runtime) or option 13 (Repair)"
         fi
     done
     echo ""
