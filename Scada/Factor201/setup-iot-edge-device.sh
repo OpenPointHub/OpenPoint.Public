@@ -883,17 +883,65 @@ iotedge_runtime() {
                 echo -e "${YELLOW}  ✓ Created: $dir (owner '$owner' not found — will be fixed on config apply)${NC}"
             fi
             DIRS_OK=0
+        else
+            # Fix ownership on existing directories — a manual mkdir or
+            # partial install may have left them owned by root
+            if id -u "$owner" &>/dev/null; then
+                actual_owner=$(stat -c '%U' "$dir" 2>/dev/null)
+                if [ "$actual_owner" != "$owner" ]; then
+                    chown "$owner:$group" "$dir"
+                    chmod 0770 "$dir"
+                    echo -e "${YELLOW}  ✓ Fixed ownership: $dir ($actual_owner → $owner)${NC}"
+                    DIRS_OK=0
+                fi
+            fi
         fi
     done
     
     if [ $DIRS_OK -eq 1 ]; then
-        echo "  ✓ All IoT Edge directories present"
+        echo "  ✓ All IoT Edge directories present with correct ownership"
     else
         echo -e "${YELLOW}  ⚠ Missing directories were created — package may have installed incompletely${NC}"
         echo "  If problems persist, run a clean reinstall:"
         echo "    sudo apt-get purge -y aziot-edge aziot-identity-service"
         echo "    sudo rm -rf /etc/aziot /var/lib/aziot /var/secrets/aziot"
         echo "    sudo apt-get install -y aziot-edge"
+    fi
+    
+    # Clear stale certificate, key, and identity data from runtime directories.
+    # If a previous "iotedge config apply" partially succeeded (e.g., DPS
+    # registration worked but the trust bundle cert write was interrupted),
+    # the runtime directories contain corrupt database entries. When certd
+    # restarts, it finds a ghost entry for "aziot-edged-trust-bundle" but
+    # the stored cert data is invalid, producing:
+    #   "could not load cert with id aziot-edged-trust-bundle
+    #    -- parameter id has an invalid value"
+    # This cascading failure prevents aziot-edged from starting (management
+    # socket timeout) and makes "iotedge list" hang for 30 seconds.
+    #
+    # Clearing is safe: "iotedge config apply" regenerates ALL certs, keys,
+    # and identity state from config.toml. Persistent module data lives in
+    # /var/lib/iotedge/ (unaffected).
+    echo ""
+    echo "  Clearing stale runtime data (ensures clean cert/key generation)..."
+    local STALE_FILES_FOUND=0
+    for state_dir in /var/lib/aziot/certd /var/lib/aziot/keyd /var/lib/aziot/identityd /var/lib/aziot/edged; do
+        if [ -d "$state_dir" ]; then
+            file_count=$(find "$state_dir" -type f 2>/dev/null | wc -l)
+            if [ "$file_count" -gt 0 ]; then
+                find "$state_dir" -type f -delete 2>/dev/null
+                echo "  ✓ Cleared $file_count stale file(s) from $state_dir"
+                STALE_FILES_FOUND=1
+            fi
+        fi
+    done
+    if [ $STALE_FILES_FOUND -eq 0 ]; then
+        echo "  ✓ Runtime directories are clean (no stale data)"
+    else
+        echo -e "${YELLOW}  ⚠ Stale runtime data cleared — certs/keys will be regenerated on config apply${NC}"
+        if [ -f /etc/aziot/config.toml ]; then
+            echo "    Re-apply configuration to regenerate certs: sudo iotedge config apply"
+        fi
     fi
     
     # Verify aziot-identity-service is installed (required dependency)
@@ -1464,6 +1512,21 @@ EOF
             # each service's config.d/ → restarts all aziot services.
             # The ExecStartPre drop-in fires during that restart, fixing ownership.
             if command -v iotedge &>/dev/null; then
+                # Clear stale cert/key/identity data before config apply.
+                # A previous failed "iotedge config apply" may have left
+                # corrupt trust bundle entries in the certd database,
+                # causing "parameter id has an invalid value" on restart.
+                # This cascading failure prevents aziot-edged from starting
+                # and makes the management socket timeout on iotedge list.
+                # Clearing is safe: config apply regenerates everything.
+                echo "  Clearing stale runtime data for clean cert generation..."
+                for state_dir in /var/lib/aziot/certd /var/lib/aziot/keyd /var/lib/aziot/identityd /var/lib/aziot/edged; do
+                    if [ -d "$state_dir" ]; then
+                        find "$state_dir" -type f -delete 2>/dev/null
+                    fi
+                done
+                echo "  ✓ Runtime data cleared"
+                
                 echo "  Applying configuration and restarting IoT Edge services..."
                 iotedge config apply 2>&1 | sed 's/^/    /'
                 local apply_result=$?
@@ -2656,6 +2719,28 @@ verify_iotedge_health() {
             echo "         Fix: re-run option 6 (IoT Edge Runtime) or option 13 (Repair)"
         fi
     done
+    
+    # Check for stale runtime data that causes trust bundle errors.
+    # A partially-failed "iotedge config apply" can leave corrupt cert
+    # entries in certd's database, producing:
+    #   "could not load cert with id aziot-edged-trust-bundle
+    #    -- parameter id has an invalid value"
+    echo "  Stale runtime data:"
+    local STALE_DATA_FOUND=0
+    for state_dir in /var/lib/aziot/certd /var/lib/aziot/keyd /var/lib/aziot/identityd /var/lib/aziot/edged; do
+        if [ -d "$state_dir" ]; then
+            local fc=$(find "$state_dir" -type f 2>/dev/null | wc -l)
+            if [ "$fc" -gt 0 ]; then
+                warn "$state_dir has $fc leftover file(s) from previous provisioning"
+                echo "         This may cause 'parameter id has an invalid value' errors"
+                echo "         Fix: re-run option 6 (IoT Edge Runtime) to clear stale data"
+                STALE_DATA_FOUND=1
+            fi
+        fi
+    done
+    if [ $STALE_DATA_FOUND -eq 0 ]; then
+        pass "No stale runtime data in cert/key/identity directories"
+    fi
     echo ""
     
     # ── 4. Config template ────────────────────────────────────────────────
