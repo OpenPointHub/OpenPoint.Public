@@ -2633,6 +2633,22 @@ repair_iotedge() {
         return 1
     fi
     
+    # Re-add Microsoft package repository.
+    # The purge + autoremove in steps 2/5 can remove packages-microsoft-prod,
+    # which deletes /etc/apt/sources.list.d/microsoft-prod.list.
+    # Without the repo, apt can't find aziot-edge and the install fails with
+    # "E: Unable to locate package aziot-edge".
+    echo "  Ensuring Microsoft package repository is configured..."
+    if [ ! -f /etc/apt/sources.list.d/microsoft-prod.list ]; then
+        UBUNTU_VERSION=$(lsb_release -rs)
+        wget -q "https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb" -O /tmp/packages-microsoft-prod.deb
+        dpkg -i /tmp/packages-microsoft-prod.deb > /dev/null 2>&1
+        rm -f /tmp/packages-microsoft-prod.deb
+        echo "  ✓ Microsoft repository re-added"
+    else
+        echo "  ✓ Microsoft repository already configured"
+    fi
+    
     echo "  Updating package lists..."
     apt-get update --fix-missing 2>&1 | tail -5
     
@@ -2643,7 +2659,15 @@ repair_iotedge() {
     if [ $install_result -ne 0 ]; then
         echo ""
         echo -e "${RED}✗ Failed to reinstall aziot-edge (exit code: $install_result)${NC}"
+        echo ""
         echo "  Check log: /tmp/iotedge-repair.log"
+        echo ""
+        echo "  Manual recovery:"
+        echo "    UBUNTU_VERSION=\$(lsb_release -rs)"
+        echo "    wget https://packages.microsoft.com/config/ubuntu/\${UBUNTU_VERSION}/packages-microsoft-prod.deb -O packages-microsoft-prod.deb"
+        echo "    sudo dpkg -i packages-microsoft-prod.deb"
+        echo "    sudo apt-get update"
+        echo "    sudo apt-get install -y aziot-edge"
         set -e
         return 1
     fi
