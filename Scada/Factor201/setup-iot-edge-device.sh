@@ -77,6 +77,7 @@ show_menu() {
     echo -e "  ${GREEN}13${NC}) ${YELLOW}Repair IoT Edge${NC} - Purge and clean reinstall (fixes broken installs)"
     echo -e "  ${GREEN}14${NC}) ${CYAN}Pre-Provision Health Check${NC} - Verify install is clean before connecting to Azure"
     echo -e "  ${GREEN}15${NC}) ${RED}Quarantine Device${NC} - Immediately stop & disable all Azure IoT services"
+    echo -e "  ${GREEN}16${NC}) ${GREEN}Apply Config${NC} - Safely apply config.toml (generates certs, patches config, then applies)"
     echo ""
     echo -e "  ${YELLOW}0${NC}) Exit"
     echo ""
@@ -716,6 +717,143 @@ EOF
     echo -e "${GREEN}✓ Container engine ready${NC}"
 }
 
+# Generate Edge CA and trust bundle certificates.
+#
+# IoT Edge's internal "quickstart" cert auto-generation can fail silently
+# on some platforms (ARM64 + Ubuntu 24.04), producing:
+#   "could not load cert with id aziot-edged-trust-bundle
+#    -- parameter id has an invalid value"
+#
+# By providing explicit cert files and referencing them in config.toml,
+# we tell certd to import known-good certificates instead of relying on
+# the internal generation. This completely bypasses the quickstart path.
+#
+# Generated files:
+#   /etc/aziot/certificates/edge-ca.pem      — Edge CA certificate
+#   /etc/aziot/certificates/edge-ca-key.pem  — Edge CA private key
+#   /etc/aziot/certificates/trust-bundle.pem — Trust bundle (= CA cert)
+generate_edge_certificates() {
+    local CERT_DIR="/etc/aziot/certificates"
+    
+    # Check if certs already exist and are valid (not expired within 24h)
+    if [ -f "$CERT_DIR/edge-ca.pem" ] && \
+       [ -f "$CERT_DIR/edge-ca-key.pem" ] && \
+       [ -f "$CERT_DIR/trust-bundle.pem" ]; then
+        if openssl x509 -checkend 86400 -noout -in "$CERT_DIR/edge-ca.pem" 2>/dev/null; then
+            echo "  ✓ Edge certificates exist and are valid"
+            return 0
+        else
+            echo -e "${YELLOW}  ⚠ Edge CA cert expired or invalid, regenerating...${NC}"
+        fi
+    fi
+    
+    echo "  Generating Edge CA certificate and trust bundle..."
+    mkdir -p "$CERT_DIR"
+    
+    # Generate a self-signed CA cert (used as both Edge CA and trust bundle).
+    # RSA 4096 is strong enough for production and fast on ARM64.
+    # 730 days (~2 years) is typical for IoT Edge deployments.
+    if ! openssl req -x509 -newkey rsa:4096 \
+        -keyout "$CERT_DIR/edge-ca-key.pem" \
+        -out "$CERT_DIR/edge-ca.pem" \
+        -sha256 -days 730 -nodes \
+        -subj "/CN=IoT Edge Device CA" 2>/dev/null; then
+        echo -e "${RED}  ✗ Failed to generate Edge CA certificate${NC}"
+        echo "    Verify openssl is installed: openssl version"
+        return 1
+    fi
+    
+    # Trust bundle = the CA cert itself.
+    # edgeHub's server cert will be signed by this CA, and modules need
+    # the trust bundle to verify edgeHub's TLS identity.
+    cp "$CERT_DIR/edge-ca.pem" "$CERT_DIR/trust-bundle.pem"
+    
+    # Set ownership so aziot services can read the files:
+    #   certd (aziotcs) reads: trust-bundle.pem, edge-ca.pem
+    #   keyd  (aziotks) reads: edge-ca-key.pem
+    if id -u aziotcs &>/dev/null; then
+        chown aziotcs:aziotcs "$CERT_DIR/edge-ca.pem" "$CERT_DIR/trust-bundle.pem"
+    fi
+    if id -u aziotks &>/dev/null; then
+        chown aziotks:aziotks "$CERT_DIR/edge-ca-key.pem"
+    fi
+    chmod 0444 "$CERT_DIR/edge-ca.pem" "$CERT_DIR/trust-bundle.pem"
+    chmod 0400 "$CERT_DIR/edge-ca-key.pem"
+    
+    echo "  ✓ Generated Edge CA cert and trust bundle (valid 730 days)"
+    echo "    $CERT_DIR/edge-ca.pem"
+    echo "    $CERT_DIR/edge-ca-key.pem"
+    echo "    $CERT_DIR/trust-bundle.pem"
+    return 0
+}
+
+# Ensure config.toml references explicit Edge CA and trust bundle certificates.
+#
+# When trust_bundle_cert and [edge_ca] are set in config.toml, "iotedge config
+# apply" imports our cert files as preloaded certs instead of triggering the
+# internal quickstart cert generation. This resolves the trust bundle error:
+#   "could not load cert with id aziot-edged-trust-bundle
+#    -- parameter id has an invalid value"
+#
+# This function is safe to call multiple times — it only modifies config.toml
+# if the settings are missing.
+patch_config_trust_bundle() {
+    local CONFIG="/etc/aziot/config.toml"
+    local CERT_DIR="/etc/aziot/certificates"
+    
+    # Only patch if config.toml exists (user has started provisioning)
+    if [ ! -f "$CONFIG" ]; then
+        return 0
+    fi
+    
+    # Only patch if our cert files exist
+    if [ ! -f "$CERT_DIR/trust-bundle.pem" ] || \
+       [ ! -f "$CERT_DIR/edge-ca.pem" ] || \
+       [ ! -f "$CERT_DIR/edge-ca-key.pem" ]; then
+        return 0
+    fi
+    
+    local CHANGED=0
+    
+    # ── trust_bundle_cert (top-level setting) ──
+    if grep -q '^trust_bundle_cert\s*=' "$CONFIG" 2>/dev/null; then
+        # Already set (uncommented) — update the value
+        sed -i 's|^trust_bundle_cert\s*=.*|trust_bundle_cert = "file:///etc/aziot/certificates/trust-bundle.pem"|' "$CONFIG"
+        CHANGED=1
+    elif grep -q '#.*trust_bundle_cert' "$CONFIG" 2>/dev/null; then
+        # Commented out in template — add active line after the comment
+        sed -i '/#.*trust_bundle_cert/a trust_bundle_cert = "file:///etc/aziot/certificates/trust-bundle.pem"' "$CONFIG"
+        CHANGED=1
+    else
+        # Not present at all — insert before the first [section] header
+        local FIRST_SECTION_LINE
+        FIRST_SECTION_LINE=$(grep -n '^\[' "$CONFIG" | head -1 | cut -d: -f1)
+        if [ -n "$FIRST_SECTION_LINE" ]; then
+            sed -i "${FIRST_SECTION_LINE}i trust_bundle_cert = \"file:///etc/aziot/certificates/trust-bundle.pem\"" "$CONFIG"
+        else
+            echo '' >> "$CONFIG"
+            echo 'trust_bundle_cert = "file:///etc/aziot/certificates/trust-bundle.pem"' >> "$CONFIG"
+        fi
+        CHANGED=1
+    fi
+    
+    # ── [edge_ca] section ──
+    if ! grep -q '^\[edge_ca\]' "$CONFIG" 2>/dev/null; then
+        cat >> "$CONFIG" <<'EDGECA'
+
+[edge_ca]
+cert = "file:///etc/aziot/certificates/edge-ca.pem"
+pk = "file:///etc/aziot/certificates/edge-ca-key.pem"
+EDGECA
+        CHANGED=1
+    fi
+    
+    if [ $CHANGED -eq 1 ]; then
+        echo "  ✓ Patched config.toml with explicit Edge CA and trust bundle"
+    fi
+    return 0
+}
+
 # IoT Edge runtime installation
 iotedge_runtime() {
     echo -e "${BLUE}[STEP 5] IoT Edge Runtime Installation${NC}"
@@ -944,6 +1082,17 @@ iotedge_runtime() {
         fi
     fi
     
+    # Generate explicit Edge CA and trust bundle certificates.
+    # This bypasses the quickstart cert auto-generation which fails on some
+    # platforms with: "parameter id has an invalid value"
+    echo ""
+    echo -e "${GREEN}  Generating Edge CA certificates...${NC}"
+    generate_edge_certificates
+    
+    # If config.toml already exists (re-running option 6 on provisioned device),
+    # patch it to reference our explicit certs
+    patch_config_trust_bundle
+    
     # Verify aziot-identity-service is installed (required dependency)
     if ! systemctl list-unit-files aziot-identityd.service &>/dev/null; then
         echo -e "${RED}  ✗ aziot-identityd service not found — aziot-identity-service package missing${NC}"
@@ -967,7 +1116,12 @@ iotedge_runtime() {
         echo -e "${CYAN}  ℹ️  Config template available. To provision this device:${NC}"
         echo "    sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
         echo "    sudo nano /etc/aziot/config.toml  # Add your DPS/connection string"
-        echo "    sudo iotedge config apply"
+        echo ""
+        echo -e "${CYAN}  ℹ️  Edge CA certificates have been pre-generated.${NC}"
+        echo -e "${GREEN}    Use option 16 (Apply Config) to safely apply the configuration.${NC}"
+        echo "    It will auto-patch config.toml with cert references before applying."
+        echo ""
+        echo "    DO NOT run 'sudo iotedge config apply' directly — use option 16 instead."
     fi
     
     # Install TPM tools
@@ -1512,6 +1666,17 @@ EOF
             # each service's config.d/ → restarts all aziot services.
             # The ExecStartPre drop-in fires during that restart, fixing ownership.
             if command -v iotedge &>/dev/null; then
+                # Generate explicit Edge CA and trust bundle certificates,
+                # then patch config.toml to reference them. This bypasses
+                # the quickstart cert auto-generation which fails on some
+                # platforms with "parameter id has an invalid value".
+                echo "  Ensuring Edge CA certificates exist..."
+                generate_edge_certificates
+                echo ""
+                echo "  Patching config.toml with cert references..."
+                patch_config_trust_bundle
+                echo ""
+                
                 # Clear stale cert/key/identity data before config apply.
                 # A previous failed "iotedge config apply" may have left
                 # corrupt trust bundle entries in the certd database,
@@ -2548,6 +2713,13 @@ repair_iotedge() {
         apt-get install -y aziot-identity-service 2>&1 | tail -5
     fi
     
+    # Generate explicit Edge CA and trust bundle certificates.
+    # This ensures the certs exist before the user provisions the device,
+    # avoiding the quickstart cert generation bug.
+    echo ""
+    echo "  Generating Edge CA certificates..."
+    generate_edge_certificates
+    
     # Re-enable exit-on-error
     set -e
     
@@ -2581,10 +2753,14 @@ repair_iotedge() {
     echo '       global_endpoint = "https://global.azure-devices-provisioning.net"'
     echo '       id_scope = "<your-id-scope>"'
     echo ""
+    echo ""
     echo "  3. Run the health check (option 14) to confirm the install is clean"
     echo ""
-    echo "  4. Only if ALL checks pass, apply the configuration:"
-    echo "     sudo iotedge config apply"
+    echo -e "  4. ${GREEN}Use option 16 (Apply Config) to safely apply the configuration.${NC}"
+    echo "     It will auto-patch config.toml with Edge CA cert references,"
+    echo "     clear stale data, and run 'iotedge config apply' for you."
+    echo ""
+    echo -e "     ${RED}DO NOT run 'sudo iotedge config apply' directly — use option 16.${NC}"
     echo ""
     echo "  5. Verify it's working:"
     echo "     sudo iotedge system status"
@@ -2758,6 +2934,48 @@ verify_iotedge_health() {
         echo "         If re-provisioning, delete it first: sudo rm /etc/aziot/config.toml"
     else
         pass "No leftover config.toml (clean state)"
+    fi
+    
+    # Check Edge CA certificates (explicit certs bypass broken quickstart)
+    echo "  Edge CA certificates:"
+    local CERT_DIR="/etc/aziot/certificates"
+    if [ -f "$CERT_DIR/edge-ca.pem" ] && [ -f "$CERT_DIR/edge-ca-key.pem" ] && [ -f "$CERT_DIR/trust-bundle.pem" ]; then
+        if openssl x509 -checkend 86400 -noout -in "$CERT_DIR/edge-ca.pem" 2>/dev/null; then
+            local CERT_EXPIRY
+            CERT_EXPIRY=$(openssl x509 -enddate -noout -in "$CERT_DIR/edge-ca.pem" 2>/dev/null | sed 's/notAfter=//')
+            pass "Edge CA cert valid (expires: $CERT_EXPIRY)"
+            pass "Trust bundle cert exists"
+        else
+            fail "Edge CA cert expired — re-run option 6 (IoT Edge Runtime) to regenerate"
+        fi
+        
+        # Check ownership
+        local CA_OWNER=$(stat -c '%U' "$CERT_DIR/edge-ca.pem" 2>/dev/null)
+        local KEY_OWNER=$(stat -c '%U' "$CERT_DIR/edge-ca-key.pem" 2>/dev/null)
+        if [ "$CA_OWNER" = "aziotcs" ] && [ "$KEY_OWNER" = "aziotks" ]; then
+            pass "Cert file ownership correct (aziotcs/aziotks)"
+        else
+            fail "Cert file ownership wrong (ca=$CA_OWNER, key=$KEY_OWNER) — expected aziotcs/aziotks"
+            echo "         Fix: re-run option 6 (IoT Edge Runtime)"
+        fi
+    else
+        fail "Edge CA certificates missing — quickstart certs will be used (may fail)"
+        echo "         Fix: re-run option 6 (IoT Edge Runtime) to generate explicit certs"
+        echo "         This resolves 'parameter id has an invalid value' trust bundle errors"
+    fi
+    
+    # Check config.toml references explicit certs (if config.toml exists)
+    if [ -f /etc/aziot/config.toml ]; then
+        if grep -q '^trust_bundle_cert\s*=' /etc/aziot/config.toml 2>/dev/null; then
+            pass "config.toml has trust_bundle_cert set"
+        else
+            warn "config.toml missing trust_bundle_cert — run option 7 to auto-patch"
+        fi
+        if grep -q '^\[edge_ca\]' /etc/aziot/config.toml 2>/dev/null; then
+            pass "config.toml has [edge_ca] section"
+        else
+            warn "config.toml missing [edge_ca] section — run option 7 to auto-patch"
+        fi
     fi
     echo ""
     
@@ -2953,7 +3171,9 @@ verify_iotedge_health() {
         echo ""
         echo "  1. sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
         echo "  2. sudo nano /etc/aziot/config.toml   # Add DPS provisioning details"
-        echo "  3. sudo iotedge config apply           # ← This contacts Azure (starts DPS)"
+        echo -e "  3. ${GREEN}Run option 16 (Apply Config)${NC} — auto-patches certs and applies safely"
+        echo ""
+        echo -e "  ${RED}DO NOT run 'sudo iotedge config apply' directly — use option 16.${NC}"
         echo ""
         if [ $WARN -gt 0 ]; then
             echo -e "${YELLOW}Review the warnings above but they won't prevent provisioning.${NC}"
@@ -2989,6 +3209,173 @@ verify_iotedge_health() {
         echo ""
         return 1
     fi
+}
+
+# Apply IoT Edge configuration safely.
+#
+# This is the ONLY recommended way to run "iotedge config apply".
+# It ensures Edge CA certificates exist and config.toml references them
+# BEFORE applying, which prevents the quickstart cert generation bug:
+#   "could not load cert with id aziot-edged-trust-bundle"
+#
+# The flow:
+#   1. Verify config.toml exists (user must create it from template first)
+#   2. Generate Edge CA certs if they don't exist
+#   3. Patch config.toml to reference the certs (trust_bundle_cert + [edge_ca])
+#   4. Stop all aziot services (clean slate)
+#   5. Clear stale runtime data (corrupt cert/key database entries)
+#   6. Run "iotedge config apply" (generates 00-super.toml + restarts services)
+#   7. Wait and show status
+apply_iotedge_config() {
+    echo -e "${BLUE}[APPLY IoT EDGE CONFIGURATION]${NC}"
+    echo ""
+    
+    # Temporarily disable exit-on-error
+    set +e
+    
+    # ── Step 1: Verify config.toml exists ─────────────────────────────────
+    local CONFIG="/etc/aziot/config.toml"
+    
+    if [ ! -f "$CONFIG" ]; then
+        echo -e "${RED}✗ config.toml not found at $CONFIG${NC}"
+        echo ""
+        echo "You must create config.toml before applying:"
+        echo ""
+        echo "  sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
+        echo "  sudo nano /etc/aziot/config.toml   # Add DPS provisioning details"
+        echo ""
+        echo "Then run this option again."
+        set -e
+        return 1
+    fi
+    
+    echo -e "${GREEN}[1/7] config.toml found${NC}"
+    
+    # Verify it has provisioning settings (basic sanity check)
+    if ! grep -q '^\[provisioning\]' "$CONFIG" 2>/dev/null; then
+        echo -e "${YELLOW}  ⚠ config.toml may not have [provisioning] section configured${NC}"
+        echo "    Make sure you've added your DPS or connection string settings."
+        echo ""
+        read -p "  Continue anyway? (y/N): " REPLY
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            set -e
+            return 0
+        fi
+    else
+        echo "  ✓ [provisioning] section found"
+    fi
+    echo ""
+    
+    # ── Step 2: Generate Edge CA certificates ─────────────────────────────
+    echo -e "${GREEN}[2/7] Ensuring Edge CA certificates exist...${NC}"
+    generate_edge_certificates
+    echo ""
+    
+    # ── Step 3: Patch config.toml with cert references ────────────────────
+    echo -e "${GREEN}[3/7] Patching config.toml with cert references...${NC}"
+    patch_config_trust_bundle
+    
+    # Show what's in config.toml for verification
+    if grep -q '^trust_bundle_cert' "$CONFIG" 2>/dev/null; then
+        echo "  ✓ trust_bundle_cert is set"
+    else
+        echo -e "${RED}  ✗ trust_bundle_cert not found in config.toml after patching${NC}"
+    fi
+    if grep -q '^\[edge_ca\]' "$CONFIG" 2>/dev/null; then
+        echo "  ✓ [edge_ca] section is set"
+    else
+        echo -e "${RED}  ✗ [edge_ca] section not found in config.toml after patching${NC}"
+    fi
+    echo ""
+    
+    # ── Step 4: Stop all aziot services ───────────────────────────────────
+    echo -e "${GREEN}[4/7] Stopping all Azure IoT services...${NC}"
+    for svc in aziot-edged aziot-identityd aziot-keyd aziot-certd aziot-tpmd; do
+        systemctl stop "${svc}.service" 2>/dev/null && echo "  ✓ Stopped ${svc}" || true
+    done
+    echo ""
+    
+    # ── Step 5: Clear stale runtime data ──────────────────────────────────
+    echo -e "${GREEN}[5/7] Clearing stale runtime data...${NC}"
+    for state_dir in /var/lib/aziot/certd /var/lib/aziot/keyd /var/lib/aziot/identityd /var/lib/aziot/edged; do
+        if [ -d "$state_dir" ]; then
+            local fc=$(find "$state_dir" -type f 2>/dev/null | wc -l)
+            if [ "$fc" -gt 0 ]; then
+                find "$state_dir" -type f -delete 2>/dev/null
+                echo "  ✓ Cleared $fc file(s) from $state_dir"
+            fi
+        fi
+    done
+    echo "  ✓ Runtime data cleared (certs/keys will be regenerated)"
+    echo ""
+    
+    # ── Step 6: Remove stale Docker containers ────────────────────────────
+    echo -e "${GREEN}[6/7] Cleaning stale Docker containers...${NC}"
+    if command -v docker &>/dev/null && systemctl is-active --quiet docker 2>/dev/null; then
+        for container in edgeAgent edgeHub; do
+            if docker ps -a --format "{{.Names}}" 2>/dev/null | grep -qx "$container"; then
+                local STATUS=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)
+                docker rm -f "$container" 2>/dev/null
+                echo "  ✓ Removed $container (was: ${STATUS:-unknown})"
+            fi
+        done
+        if docker network ls --format "{{.Name}}" 2>/dev/null | grep -qx "azure-iot-edge"; then
+            docker network rm azure-iot-edge 2>/dev/null
+            echo "  ✓ Removed stale network: azure-iot-edge"
+        fi
+    fi
+    echo ""
+    
+    # ── Step 7: Apply configuration ───────────────────────────────────────
+    echo -e "${GREEN}[7/7] Applying IoT Edge configuration...${NC}"
+    echo ""
+    echo -e "${YELLOW}  This will contact Azure DPS and register the device.${NC}"
+    read -p "  Continue? (y/N): " REPLY
+    echo ""
+    
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "  Cancelled. Config.toml has been patched with cert references."
+        echo "  You can run 'sudo iotedge config apply' manually when ready."
+        set -e
+        return 0
+    fi
+    
+    iotedge config apply 2>&1 | sed 's/^/    /'
+    local apply_result=$?
+    
+    if [ $apply_result -eq 0 ]; then
+        echo ""
+        echo -e "${GREEN}✓ IoT Edge config applied and services started${NC}"
+        echo ""
+        echo "  Waiting 20 seconds for edgeAgent to start..."
+        sleep 20
+        
+        echo ""
+        echo "  Service status:"
+        iotedge system status 2>/dev/null | sed 's/^/    /' || echo "    (could not get status)"
+        
+        echo ""
+        echo "  Container status:"
+        docker ps --format "    {{.Names}}  {{.Status}}  {{.Image}}" 2>/dev/null || echo "    (no containers yet)"
+        
+        echo ""
+        echo -e "${CYAN}Verify with:${NC}"
+        echo "  sudo iotedge system status"
+        echo "  sudo iotedge list"
+        echo "  sudo iotedge check"
+    else
+        echo ""
+        echo -e "${RED}✗ iotedge config apply failed (exit code: $apply_result)${NC}"
+        echo ""
+        echo "  Check the logs:"
+        echo "    sudo journalctl -u aziot-certd -n 30 --no-pager"
+        echo "    sudo journalctl -u aziot-keyd -n 30 --no-pager"
+        echo "    sudo journalctl -u aziot-edged -n 30 --no-pager"
+    fi
+    echo ""
+    
+    set -e
+    return $apply_result
 }
 
 # Quarantine device — immediately stop and disable all Azure IoT services
@@ -3073,17 +3460,13 @@ quarantine_device() {
     echo ""
     echo "  3. Run option 14 (Health Check) to verify the install is clean"
     echo ""
-    echo "  4. Re-enable and provision (choose one):"
-    echo "     Option A (no reboot):"
+    echo "  4. Re-enable and provision:"
     echo "       sudo systemctl enable aziot-edged aziot-identityd aziot-keyd aziot-certd"
     echo "       sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
     echo "       sudo nano /etc/aziot/config.toml   # Add DPS details"
-    echo "       sudo iotedge config apply"
-    echo "     Option B (simpler — reboot re-enables everything):"
-    echo "       sudo systemctl enable aziot-edged aziot-identityd aziot-keyd aziot-certd"
-    echo "       sudo cp /etc/aziot/config.toml.edge.template /etc/aziot/config.toml"
-    echo "       sudo nano /etc/aziot/config.toml   # Add DPS details"
-    echo "       sudo reboot"
+    echo -e "       ${GREEN}Run option 16 (Apply Config)${NC} — auto-patches certs and applies safely"
+    echo ""
+    echo -e "  ${RED}DO NOT run 'sudo iotedge config apply' directly — use option 16.${NC}"
     echo ""
     
     return 0
@@ -3222,6 +3605,10 @@ full_setup() {
     echo "       (then reboot again, and run option 11 to extract the key)"
     echo "   11. Extract TPM Key - Get registration ID and endorsement key"
     echo ""
+    echo "To provision the device after setting up config.toml:"
+    echo -e "   ${GREEN}16. Apply Config${NC} - Safely apply config (generates certs, patches config, applies)"
+    echo -e "   ${RED}DO NOT run 'sudo iotedge config apply' directly — use option 16.${NC}"
+    echo ""
     echo "To view container logs:"
     echo "   docker logs -f <container_name>"
     echo "   docker logs -f ScadaPollingModule"
@@ -3300,6 +3687,10 @@ main() {
                 ;;
             15)
                 quarantine_device
+                read -p "Press ENTER to return to menu..." dummy
+                ;;
+            16)
+                apply_iotedge_config
                 read -p "Press ENTER to return to menu..." dummy
                 ;;
             0)
